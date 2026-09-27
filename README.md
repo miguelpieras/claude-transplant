@@ -64,7 +64,7 @@ The CLI touches the network and Keychain only when you pass `--cloud`. The menub
 
 ## Menubar
 
-- Two columns: FROM on the left, TO on the right. Uncheck accounts to leave behind.
+- Two columns: FROM on the left, TO on the right. Uncheck accounts to leave behind. With FROM empty, choosing TO selects all other sources. Reset clears both columns for a new move.
 - When the active account is known, TO defaults to the most recently used other account and every other account starts as a source. Otherwise pick TO yourself.
 - Open local sessions offer Stop and restart. Finish move continues the same receipt. Keep completed cancels remaining work without reversing completed moves, including sessions rewound in Desktop when their original history remains available.
 - Held local work retries when its workers stop. Pending cloud sources retry when that account signs in.
@@ -107,7 +107,7 @@ To    ↑↓ move · enter confirm
 | `--from <match> --to <match>` | skip the picker, repeat `--from`, match on email, org name, or uuid prefix |
 | `--move-only` | move eligible records, leave Desktop-owned records held |
 | `--restart-approved <token>` | approve the exact restart plan printed for the requested operation |
-| `--cloud` | reconcile the active source, queue inaccessible sources that still have unreadable or unarchived local records |
+| `--cloud` | reconcile the active source, queue inaccessible sources with unreadable or unarchived local records or known source mirrors |
 | `--json` | one event per line |
 | `--version` | print the version |
 
@@ -198,7 +198,7 @@ Remote Control (`--cloud`):
 - Reads the active selected source through Claude Desktop's authenticated `claude.ai` session. Cookies are decrypted in memory via Keychain, sent only to `claude.ai`, never stored.
 - After history verification, a single matching local target or a unique bridge link among matching targets identifies the destination. Otherwise a same-title target must share eight consecutive exact remote messages to anchor a separate companion whose supported payloads are copied exactly into a new local transcript.
 - The source mirror is archived only after the remote worker is disconnected and unchanged and the local target verifies.
-- Inaccessible sources become pending only when unreadable or unarchived local records remain. Retries check identity, history, and connection state before touching a remote row. A failed source stays active and retryable.
+- Known source mirrors stay pending after local records move, until that source is signed in. Retries check identity, history, and connection state before touching a remote row. A failed source stays active and retryable.
 
 Safety:
 
@@ -207,7 +207,7 @@ Safety:
 - Interrupted retirement or undo resumes from the receipt. Finish move exposes interrupted task recovery and offers restart approval when the scheduler is active. Task families preserve reminders, run history, prompts and unrelated settings. Recovery rolls back only unfinished families. Undo restores the whole move. A corrupt newest receipt stops undo.
 - Later moves and sweeps report changes to title, archive state, and starred state under `drift/<receipt>`. Other Desktop bookkeeping stays quiet. Missing or unreadable records retain a warning. Undo, retirement, and source archival also ignore branch and PR bookkeeping.
 - Background checks keep the panel enabled. A click captures its command and selection, shows a waiting state, and cannot be replaced by another action before the check finishes.
-- Lineage follows `forkedFrom` pointers to their roots. Duplicate message ids count as sync replays when only runtime metadata differs, or an otherwise identical copy leaves command output or file-read content empty. Conflicting contents are refused.
+- Lineage follows `forkedFrom` pointers to their roots. Duplicate message ids count as sync replays when only runtime metadata or an `edited_text_file` attachment's display path differs, or an otherwise identical copy omits command output or file-read text or image payloads. Conflicting contents are refused.
 - A disposable planning cache lives at `~/Library/Application Support/claude-transplant/cache.json`. Every write decision uses live files. Delete it any time.
 
 ## Reading the output
@@ -224,7 +224,7 @@ Safety:
 - cloud mirrors: active or paused Remote Control rows under the signed-in source
 - cloud rescue: one divergent remote branch materialized as a separate local session from exact message payloads
 - cloud blocked: no unambiguous local anchor, unsupported payload, connected worker, changed history, or account mismatch
-- cloud checks pending: inaccessible sources that still have unreadable or unarchived local records
+- cloud checks pending: inaccessible sources with unreadable or unarchived local records or known source mirrors
 - newer cloud sessions: rows created after Move, left for the next move
 
 Accounts are labeled from `~/.claude.json`, its backups, `~/.claude*` profile directories, `~/.claude-switch/accounts/*` config directories, and Desktop's agent-mode records. Personal-plan organizations show as Personal. Accounts with no known email show a uuid prefix, session count, last activity, and most common project folder.
@@ -274,6 +274,7 @@ Active identity comes from the newest complete initialization entry in Claude De
 
 | claude-transplant | macOS | Claude Desktop | Claude Code | Tested |
 |---|---|---|---|---|
+| 4.1.0 | 27.0 | 2.9939.2 | 2.1.281 | 2026-09-26 |
 | 4.0.7 | 27.0 | 2.7032.0 | 2.1.280 | 2026-09-23 |
 | 4.0.6 | 27.0 | 1.52386.3 | 2.1.266 | 2026-09-12 |
 | 4.0.5 | 27.0 | 1.49585.0 | 2.1.260 | 2026-09-08 |

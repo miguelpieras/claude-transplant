@@ -24,7 +24,7 @@ const RESTART_BUDGET = 30_000
 const REOPEN_RESERVE = 8_000
 const LABEL = 'io.github.vitaliyhayda.claude-transplant'
 const SEMANTIC_VERSION = 3
-const CACHE_VERSION = 8
+const CACHE_VERSION = 9
 const RUNTIME_KEYS = ['slug', 'promptId', 'parentUuid', 'version', 'cwd', 'gitBranch']
 const MESSAGE_RUNTIME_KEYS = ['id', 'usage', 'diagnostics', 'stop_reason', 'stop_sequence', 'stop_details']
 const RECORD_RUNTIME_KEYS = ['lastActivityAt', 'lastFocusedAt', 'completedTurns', 'error', 'errorAt', 'priorErrorMark', 'lastSpawnRootDetected', 'promptAppendSnapshot', 'reportFindingsCard', 'scratchPromptRecents', 'writtenBranches', 'prs']
@@ -42,7 +42,7 @@ const HELP = `claude-transplant   move Claude Code history between accounts
   claude-transplant menubar     install the menubar app, --snapshot <png>, --remove uninstalls
 
   --from <match> --to <match>   skip the picker, match on email, org name, or uuid prefix
-  --cloud                       reconcile active source, queue only local work left
+  --cloud                       reconcile active source, queue remaining local work and known source mirrors
   --move-only                   move eligible records without restarting Desktop
   --restart-approved <token>    execute the exact restart plan previously displayed
   --json                        machine-readable output
@@ -953,8 +953,8 @@ const recordSemantic = (record) => sha(stable(without(record, RECORD_RUNTIME_KEY
 
 const semanticShape = (entry) => stable(without(entry, RUNTIME_KEYS))
 
-const OUTPUT_KEYS = ['stdout', 'stderr', 'fileContent']
-const toolOutput = (entry) => ({ stdout: entry.toolUseResult?.stdout, stderr: entry.toolUseResult?.stderr, fileContent: entry.toolUseResult?.file?.content })
+const OUTPUT_KEYS = ['stdout', 'stderr', 'fileContent', 'fileBase64']
+const toolOutput = (entry) => ({ stdout: entry.toolUseResult?.stdout, stderr: entry.toolUseResult?.stderr, fileContent: entry.toolUseResult?.file?.content, fileBase64: entry.toolUseResult?.file?.base64 })
 
 const stripToolOutput = (entry) => {
   const result = entry.toolUseResult
@@ -962,11 +962,16 @@ const stripToolOutput = (entry) => {
     delete result.stdout
     delete result.stderr
     if (typeof result.file?.content === 'string') delete result.file.content
+    if (typeof result.file?.base64 === 'string') delete result.file.base64
   }
   return entry
 }
 
-const replayShape = (entry) => stable(stripToolOutput(without(entry, RUNTIME_KEYS)))
+const replayShape = (entry) => {
+  const copy = stripToolOutput(without(entry, RUNTIME_KEYS))
+  if (copy.type === 'attachment' && copy.attachment?.type === 'edited_text_file') delete copy.attachment.displayPath
+  return stable(copy)
+}
 const richness = (entry) => Object.values(toolOutput(entry)).reduce((n, value) => n + (typeof value === 'string' ? Buffer.byteLength(value) : 0), 0)
 
 function survivor(rows, ids) {
@@ -1134,16 +1139,15 @@ const conversationMatch = (source, target) => {
   return source.length - conversationLcs(source, target) <= tolerance ? 'equivalent' : null
 }
 
-async function priorHistory(cache, key, transcript) {
+async function priorHistory(cache, key) {
   cache.used.histories.add(key)
   const item = cache.data.histories[key]
   const dependencies = item?.value?.dependencies
   const encoded = item?.value?.result
-  if (Array.isArray(dependencies) && encoded && Array.isArray(encoded.events)) {
+  if (Array.isArray(dependencies) && encoded && Array.isArray(encoded.events) && Array.isArray(encoded.bridgeOwners) && typeof encoded.contentSha === 'string') {
     try {
       const current = await Promise.all(dependencies.map(async ([file]) => [file, await fingerprint(file, cache)]))
       if (sha(stable(current)) === item.signature) {
-        encoded.contentSha ??= sha(await readFile(transcript))
         cache.stats.historyHits++
         const events = new Map(encoded.events)
         return { ...encoded, events, roots: new Set(events.keys()) }
@@ -1157,7 +1161,7 @@ async function priorHistory(cache, key, transcript) {
 async function history(id, transcript, ctx, cwd = '') {
   const cacheKey = ctx.cache ? sha(stable({ version: CACHE_VERSION, semanticVersion: SEMANTIC_VERSION, id, transcript, cwd })) : null
   if (ctx.cache) {
-    const prior = await priorHistory(ctx.cache, cacheKey, transcript)
+    const prior = await priorHistory(ctx.cache, cacheKey)
     if (prior) return prior
   }
   const lineage = await origins(id, ctx, cwd)
@@ -1181,7 +1185,8 @@ async function history(id, transcript, ctx, cwd = '') {
   const comparable = data.invalid === 0 && conflicts === 0 && roots.size > 0
   const bridges = data.entries.filter((entry) => entry.type === 'bridge-session')
   const bridgeIds = [...new Set(bridges.map((entry) => entry.bridgeSessionId ?? entry.bridge_session_id).filter((value) => typeof value === 'string'))]
-  const result = { roots, events, conversation: conversation(normalized.entries), forks: ctx.scans.get(transcript)?.forked.size ?? 0, state, bridge: bridges.length > 0, bridgeIds, invalid: data.invalid, conflicts, comparable, snapshot: semantic(data.entries, id, data.invalid), contentSha: data.sha }
+  const bridgeOwners = bridges.map(entry => ({ id: remoteId(entry.bridgeSessionId ?? entry.bridge_session_id), account: entry.ownerAccountUuid ?? null, org: entry.ownerOrganizationUuid ?? null }))
+  const result = { roots, events, conversation: conversation(normalized.entries), forks: ctx.scans.get(transcript)?.forked.size ?? 0, state, bridge: bridges.length > 0, bridgeIds, bridgeOwners, invalid: data.invalid, conflicts, comparable, snapshot: semantic(data.entries, id, data.invalid), contentSha: data.sha }
   if (ctx.cache) {
     const encoded = { ...result, roots: undefined, events: [...events] }
     cacheStore(ctx.cache, 'histories', cacheKey, sha(stable(dependencyRows)), { dependencies: dependencyRows, result: encoded })
@@ -1211,6 +1216,17 @@ const bridgeIdsOf = (row) => [row, ...(row.members ?? [])].flatMap((member) => {
   return [...(member.bridgeIds ?? []), ...(record.bridgeSessionIds ?? [])]
 })
 const remoteIdsOf = (row) => [...new Set(bridgeIdsOf(row).map(remoteId).filter(Boolean))]
+const sourceCloudLinks = (sources) => sources.flatMap(source => (source.members ?? [source]).flatMap(member => {
+  const bridgeIds = remoteIdsOf(member).filter(id => (member.bridgeOwners ?? []).every(owner => owner.id !== id ||
+    sameAccount({ account: owner.account ?? member.account.account, org: owner.org ?? member.account.org }, member.account)))
+  return bridgeIds.length ? [{ ...accountRef(member.account), targetId: source.cloudTargetId ?? source.id, bridgeIds }] : []
+}))
+const linkedCloudIds = (links, account) => [...new Set(links.filter(row => sameAccount(row, account)).flatMap(row => row.bridgeIds).map(remoteId).filter(Boolean))]
+const retainedCloudChecks = (receipt, inv, current) => receipt.cloudChecks.flatMap(check => {
+  if (inv.cloud?.checked && sameAccount(check, inv.cloud) || inv.deferredCloudSources?.some(source => sameAccount(check, source)) || localCloudPending(current.find(account => sameAccount(account, check)))) return [check]
+  const sessionIds = linkedCloudIds(receipt.cloudLinks, check)
+  return sessionIds.length ? [{ ...check, sessionIds }] : []
+})
 const validDesktopRecord = (row) => {
   const record = desktopRecordOf(row)
   const file = desktopFileOf(row)
@@ -1292,7 +1308,9 @@ async function cloudInventory(cloud, from, targets, move, cache, report, cutoff 
       }
       const findCovered = (items) => items.flatMap((candidate) => {
         const matchMode = conversationMatch(remoteConversation, candidate.conversation)
-        return matchMode ? [{ ...candidate, matchMode }] : []
+        if (matchMode) return [{ ...candidate, matchMode }]
+        const retained = candidate.row.retainedHistories?.find(history => history.bridgeIds.includes(sessionId) && conversationMatch(remoteConversation, history.conversation))
+        return retained ? [{ ...candidate, matchMode: conversationMatch(remoteConversation, retained.conversation), retained }] : []
       })
       const eligible = remoteConversation.length >= 4 ? candidates : [...new Set([...named, ...linked])]
       const covered = findCovered(eligible)
@@ -1488,8 +1506,18 @@ export async function inventory(from, to, paths, report = () => {}, options = {}
     }
   }
   for (const target of targets) {
-    const remembered = options.cloudBridgeIds?.get(target.id) ?? []
+    const prior = target.session.record.priorCliSessionIds
+    const priorIds = Array.isArray(prior) ? prior.filter(id => UUID.test(id) && options.cloudBridgeIds?.has(id)) : []
+    const remembered = [target.id, ...priorIds].flatMap(id => options.cloudBridgeIds?.get(id) ?? [])
     if (remembered.length) target.bridgeIds = [...new Set([...(target.bridgeIds ?? []), ...remembered.map(remoteId).filter(Boolean)])]
+    for (const id of priorIds) {
+      const transcript = locate(ctx.index, id, target.session.cwd)
+      if (!transcript) continue
+      try {
+        const detail = await history(id, transcript, ctx, target.session.cwd)
+        if (detail.comparable) (target.retainedHistories ??= []).push({ transcript, fingerprint: await fingerprint(transcript, cache), contentSha: detail.contentSha, conversation: detail.conversation, bridgeIds: options.cloudBridgeIds.get(id).map(remoteId).filter(Boolean) })
+      } catch {}
+    }
   }
   const covering = (s) => targets.find((target) => target.record && s.members.every((member) => included(member, target) && (!requiredParents.has(member.record.sessionId) || target.record === member.record.sessionId))) ?? null
   const there = []
@@ -1514,10 +1542,12 @@ export async function inventory(from, to, paths, report = () => {}, options = {}
   if (options.cloud && brokenTasks) throw new Error(brokenTasks.taskError)
   const cloudPlan = await cloudInventory(options.cloud, from, targets, options.cloudTargetOnly ? [] : move, cache, report, cloudCutoff, found, options.cloudSessionIds)
   const retiring = new Set([...move, ...there].flatMap((row) => (row.members ?? [row]).map((member) => member.file)))
-  const cloudCheckAccounts = from.filter((account) => {
-    if (cloudPlan.checked && sameAccount(account, cloudPlan)) return true
-    return localCloudPending(account, retiring)
-  }).map(accountRef)
+  const links = sourceCloudLinks([...move, ...there])
+  const cloudCheckAccounts = from.flatMap(account => {
+    if (cloudPlan.checked && sameAccount(account, cloudPlan) || localCloudPending(account, retiring)) return [accountRef(account)]
+    const sessionIds = linkedCloudIds(links, account)
+    return sessionIds.length ? [{ ...accountRef(account), sessionIds }] : []
+  })
   check()
   await saveAnalysisCache(cache)
   check()
@@ -2686,13 +2716,13 @@ const remoteReceipt = (match) => ({
   matchMode: match.target.matchMode
 })
 
-async function targetActivation(row) {
+async function targetActivation(row, keepArchived = false) {
   const record = path.isAbsolute(row?.record ?? '') ? row.record : row?.session?.file
   const raw = record ? await readFile(record, 'utf8').catch(() => null) : null
   if (!raw) throw new Error('local target record is missing')
   const current = JSON.parse(raw)
   if (recordSemantic(current) !== row.recordSemantic) throw new Error('local target record changed before Remote Control archival')
-  if (current.isArchived !== true) return null
+  if (keepArchived || current.isArchived !== true) return null
   const after = { ...current, isArchived: false }
   const afterText = jsonText(after)
   return { record, beforeSha: sha(raw), beforeSemantic: recordSemantic(current), afterSha: sha(afterText), afterSemantic: recordSemantic(after), after }
@@ -2827,10 +2857,13 @@ async function archiveCloud(inv, receipt, save, report = () => {}) {
       continue
     }
     const liveWorkers = workers()
+    const retained = match.target.retained
+    const retainedUnchanged = async () => !retained || await fingerprint(retained.transcript).catch(() => null) === retained.fingerprint &&
+      await readFile(retained.transcript).then(sha).catch(() => null) === retained.contentSha
     const targetOkay = row?.targetId
       ? !(await targetChanges(row, liveWorkers, true)).length
       : row ? await untouched(row, liveWorkers) : false
-    if (!targetOkay) {
+    if (!targetOkay || !await retainedUnchanged()) {
       addCloudFailure(receipt, inv.cloud, { id: match.session.id, title: match.session.title, error: 'local target changed before Remote Control archival' })
       progress(report, 'cloud', ++archived, matches.length)
       continue
@@ -2849,7 +2882,7 @@ async function archiveCloud(inv, receipt, save, report = () => {}) {
     }
     let activation
     try {
-      activation = await targetActivation(row)
+      activation = await targetActivation(row, match.target.kind === 'existing' && receipt.sessions.some(session => session.record === row.session?.file && !session.archived))
     } catch (error) {
       addCloudFailure(receipt, inv.cloud, { id: match.session.id, title: match.session.title, error: error.message, code: error.code, localId: match.target.id })
       progress(report, 'cloud', ++archived, matches.length)
@@ -2865,6 +2898,7 @@ async function archiveCloud(inv, receipt, save, report = () => {}) {
       const current = await stableRemoteRows(cloud, pending.id)
       if (current.marker !== pending.lastEventAt) throw new Error('Remote Control history changed before archival')
       if (current.stateSha !== pending.stateSha) throw new Error('Remote Control history or input changed before archival')
+      if (retained && (!await retainedUnchanged() || !await untouched(row, workers()))) throw new Error('Retained local history changed before Remote Control archival')
       attempted = true
       await cloud.archive(pending.id)
       const after = await waitRemote(cloud, pending.id, ['archived'])
@@ -3029,8 +3063,7 @@ async function transfer(inv, to, paths, report, context = {}) {
   const receipt = result.receipt
   if (inv.cloudRequested && !context.existing) {
     const current = await accounts(paths)
-    receipt.cloudChecks = receipt.cloudChecks.filter(check => inv.cloud?.checked && sameAccount(check, inv.cloud) ||
-      inv.deferredCloudSources?.some(source => sameAccount(check, source)) || localCloudPending(current.find(account => sameAccount(account, check))))
+    receipt.cloudChecks = retainedCloudChecks(receipt, inv, current)
     await saveJson(result.file, receipt)
   }
   const pendingCloud = openCloudChecks(receipt).length
@@ -3059,10 +3092,7 @@ async function transferRecords(inv, to, paths, report, context = {}) {
     toAccount: inv.toAccount ?? accountRef(to),
     cloudChecks: inv.cloudRequested ? [...new Map([...(inv.cloudCheckAccounts ?? inv.fromAccounts ?? []), ...(inv.deferredCloudSources ?? [])].map((account) => [`${account.account}/${account.org}`, { ...account, status: 'pending' }])).values()] : [],
     cloudError: inv.cloudError || null,
-    cloudLinks: [...inv.move, ...inv.there].flatMap((source) => (source.members ?? [source]).flatMap((member) => {
-      const bridgeIds = remoteIdsOf(member)
-      return bridgeIds.length ? [{ account: member.account.account, org: member.account.org, targetId: source.cloudTargetId ?? source.id, bridgeIds }] : []
-    })),
+    cloudLinks: sourceCloudLinks([...inv.move, ...inv.there]),
     sessions: [],
     remote: [],
     failed: initialFailures,
@@ -3077,10 +3107,19 @@ async function transferRecords(inv, to, paths, report, context = {}) {
     receipt.failed = receipt.failed.filter((row) => !retryIds.has(row.id) || row.retained || row.cloudAccount)
     receipt.failed.push(...initialFailures)
     receipt.finalizing = true
-    for (const source of [...inv.move, ...inv.there]) for (const member of source.members ?? [source]) {
-      const ids = remoteIdsOf(member)
-      if (ids.length) receipt.cloudLinks.push({ account: member.account.account, org: member.account.org, targetId: source.cloudTargetId ?? source.id, bridgeIds: ids })
+    const links = sourceCloudLinks([...inv.move, ...inv.there])
+    for (const source of inv.cloudCheckAccounts ?? []) {
+      const check = receiptCloudCheck(receipt, source)
+      if (!check) {
+        if (inv.cloudRequested) receipt.cloudChecks.push({ ...source, status: 'pending' })
+      } else if (check.status !== 'cancelled') {
+        const ids = source.sessionIds ?? linkedCloudIds(links, source)
+        const prior = check.sessionIds ?? linkedCloudIds(receipt.cloudLinks, source)
+        if (check.status === 'complete' && ids.some(id => !prior.includes(id))) clearCloudAttempt(receipt, source)
+        if (check.sessionIds) check.sessionIds = [...new Set([...check.sessionIds, ...ids])]
+      }
     }
+    receipt.cloudLinks.push(...links)
   }
   receipt.held = held
   const previousCount = receipt.sessions.length
@@ -3172,7 +3211,7 @@ async function transferRecords(inv, to, paths, report, context = {}) {
   if (inv.cloudRequested) {
     const current = await accounts(paths)
     const actual = receipt.fromAccounts.filter((source) => localCloudPending(current.find((account) => sameAccount(account, source))))
-    if (!context.existing) receipt.cloudChecks = receipt.cloudChecks.filter((check) => inv.cloud?.checked && sameAccount(check, inv.cloud) || inv.deferredCloudSources?.some((source) => sameAccount(check, source)) || actual.some((source) => sameAccount(check, source)))
+    if (!context.existing) receipt.cloudChecks = retainedCloudChecks(receipt, inv, current)
     for (const source of actual) if (!receipt.cloudChecks.some((check) => sameAccount(check, source))) receipt.cloudChecks.push({ ...source, status: 'pending' })
   }
   context.check?.(true)

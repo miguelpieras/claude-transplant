@@ -695,51 +695,123 @@ test('normalize collapses replays and reports conflicts', () => {
 
 test('file-read replays keep the full payload and refuse incompatible copies', () => {
   const parent = entry('assistant', 1, null, SOURCE)
-  const full = entry('user', 2, 1, SOURCE, { toolUseResult: { type: 'text', file: { filePath: '/tmp/fixture.txt', content: 'full file body', numLines: 1 } } })
-  const replay = { ...full, toolUseResult: { ...full.toolUseResult, file: { ...full.toolUseResult.file, content: '' } } }
-  for (const rows of [[parent, full, replay], [parent, replay, full]]) {
-    const result = normalize(rows)
+  for (const [type, key, file, snapshot] of [
+    ['text', 'content', { filePath: '/tmp/fixture.txt', content: 'full file body', numLines: 1 }, '1eb370dc75ffeb3c25ea8cbd9b5cf2c10916baa3441492ac4749a156a23d8c91'],
+    ['image', 'base64', { base64: Buffer.alloc(96 * 1024, 0xab).toString('base64'), dimensions: { width: 256, height: 128 }, originalSize: 96 * 1024, type: 'image/png' }, 'ce9edbd7fdd2d1531c89919b8cd343335e3f784f633e92f07f386cf86c8b5e8a']
+  ]) {
+    const full = entry('user', 2, 1, SOURCE, { toolUseResult: { type, file } })
+    assert.equal(semantic([parent, full], SOURCE), snapshot)
+    for (const omitted of [false, true]) {
+      const replay = { ...full, toolUseResult: { ...full.toolUseResult, file: { ...file, [key]: '' } } }
+      if (omitted) delete replay.toolUseResult.file[key]
+      for (const rows of [[parent, full, replay], [parent, replay, full]]) {
+        const before = structuredClone(rows), result = normalize(rows)
+        assert.equal(result.conflicts, 0)
+        assert.equal(result.replays, 1)
+        assert.deepEqual(result.entries, [parent, full])
+        assert.equal(result.entries[1], full)
+        assert.equal(semantic(rows, SOURCE), snapshot)
+        assert.deepEqual(rows, before)
+        if (key === 'base64') assert.deepEqual(Buffer.from(result.entries[1].toolUseResult.file.base64, 'base64'), Buffer.alloc(96 * 1024, 0xab))
+      }
+    }
+    const incompatible = [
+      ...[Buffer.from('different payload').toString('base64'), null, 42, { text: 'unexpected shape' }].map(value => ({ ...file, [key]: value })),
+      ...(type === 'text' ? [{ filePath: '/tmp/other.txt' }, { numLines: 2 }] : [{ dimensions: { width: 512, height: 128 } }, { originalSize: 1 }, { type: 'image/jpeg' }]).map(changed => ({ ...file, [key]: '', ...changed })),
+      ...Object.keys(file).filter(field => field !== key).map(field => ({ ...file, [key]: '', [field]: null })),
+      { ...file, [key]: '', extra: true },
+      { [key]: '' },
+      undefined
+    ]
+    for (const changedFile of incompatible) {
+      const changed = { ...full, toolUseResult: { ...full.toolUseResult, file: changedFile } }
+      for (const rows of [[parent, full, changed], [parent, changed, full]]) {
+        const result = normalize(rows)
+        assert.equal(result.conflicts, 1)
+        assert.equal(result.replays, 0)
+        assert.deepEqual(result.entries, rows)
+      }
+    }
+    const fileOnly = { ...full, toolUseResult: { ...full.toolUseResult, stdout: '', stderr: '' } }
+    const outputOnly = { ...full, toolUseResult: { ...full.toolUseResult, stdout: 'command output', stderr: 'command error', file: { ...file, [key]: '' } } }
+    const complete = { ...full, toolUseResult: { ...outputOnly.toolUseResult, file } }
+    for (const copies of [[fileOnly, outputOnly], [outputOnly, fileOnly]]) {
+      assert.equal(normalize([parent, ...copies]).conflicts, 1)
+      for (const rows of [[parent, ...copies, complete], [parent, complete, ...copies]]) {
+        const result = normalize(rows)
+        assert.equal(result.conflicts, 0)
+        assert.deepEqual(result.entries, [parent, complete])
+        assert.equal(result.entries[1], complete)
+      }
+    }
+  }
+})
+
+test('edited-text attachment replays ignore only their display path', () => {
+  const parent = entry('assistant', 1, null, SOURCE)
+  const original = entry('attachment', 2, 1, SOURCE, { attachment: { type: 'edited_text_file', filename: '/tmp/fixture.txt', snippet: 'synthetic file edit' } })
+  const replay = { ...original, attachment: { ...original.attachment, displayPath: 'fixture.txt' } }
+  assert.equal(semantic([parent, original], SOURCE), '3a7e37a2ae90a9f7fbf77ef203cf3ec5ba6427da4fe10508d8774052f1cba8fa')
+  assert.equal(semantic([parent, replay], SOURCE), 'c53ead433799ea63ec5dfda594a9bb3f6ce9fb74699f9913238f080ab637236c')
+  for (const rows of [[parent, original, replay], [parent, replay, original]]) {
+    const before = structuredClone(rows), result = normalize(rows)
     assert.equal(result.conflicts, 0)
     assert.equal(result.replays, 1)
-    assert.deepEqual(result.entries, [parent, full])
-    assert.equal(semantic(rows, SOURCE), semantic([parent, full], SOURCE))
+    assert.deepEqual(result.entries, [parent, rows[1]])
+    assert.equal(result.entries[1], rows[1])
+    assert.deepEqual(rows, before)
   }
-  for (const content of ['different file body', null, { text: 'unexpected shape' }]) {
-    const changed = { ...replay, toolUseResult: { ...replay.toolUseResult, file: { ...replay.toolUseResult.file, content } } }
-    assert.equal(normalize([parent, full, changed]).conflicts, 1)
+  for (const attachment of [
+    { ...replay.attachment, filename: '/tmp/other.txt' },
+    { ...replay.attachment, snippet: 'different edit' },
+    { ...replay.attachment, type: 'other' },
+    { ...replay.attachment, extra: true }
+  ]) {
+    const changed = { ...replay, attachment }
+    for (const rows of [[parent, original, changed], [parent, changed, original]]) assert.equal(normalize(rows).conflicts, 1)
   }
-  const otherFile = { ...replay, toolUseResult: { ...replay.toolUseResult, file: { ...replay.toolUseResult.file, filePath: '/tmp/other.txt' } } }
-  assert.equal(normalize([parent, full, otherFile]).conflicts, 1)
+  assert.equal(normalize([parent, original, { ...replay, displayPath: 'top-level.txt' }]).conflicts, 1)
+  for (const [type, kind] of [['attachment', 'other'], ['user', 'edited_text_file'], ['system', 'edited_text_file'], ['progress', 'edited_text_file']]) {
+    const other = { ...original, type, attachment: { ...original.attachment, type: kind } }
+    const otherReplay = { ...other, attachment: { ...other.attachment, displayPath: 'fixture.txt' } }
+    for (const rows of [[parent, other, otherReplay], [parent, otherReplay, other]]) assert.equal(normalize(rows).conflicts, 1)
+  }
 })
 
 test('a transcript with a compact file-read replay rehomes intact and is not retired into a poorer fork', async () => {
-  const h = await home()
-  const parent = entry('assistant', 1, null, SOURCE)
-  const full = entry('user', 2, 1, SOURCE, { toolUseResult: { type: 'text', file: { filePath: '/tmp/fixture.txt', content: 'full file body', numLines: 1 } } })
-  const replay = { ...full, toolUseResult: { ...full.toolUseResult, file: { ...full.toolUseResult.file, content: '' } } }
-  await h.write(SOURCE, [parent, full, replay])
-  await h.record('P', SOURCE, rehomeRecord({ title: 'Replayed file read' }))
-  await h.write(id(991), fork([parent, replay], SOURCE, id(991), 'Poorer fork'))
-  await h.record('T', id(991), rehomeRecord({ title: 'Poorer fork' }))
-  const all = await accounts(h.paths), from = all.find(row => row.account === h.acct.P), to = all.find(row => row.account === h.acct.T)
-  const transcript = path.join(h.project, `${SOURCE}.jsonl`)
-  const before = await readFile(transcript), beforeStat = await stat(transcript)
-  const inv = await inventory([from], to, h.paths)
-  assert.equal(inv.blocked.length, 0)
-  assert.equal(inv.there.length, 0)
-  assert.equal(inv.move.length, 1)
-  const moved = await move(inv, to, h.paths)
-  assert.equal(moved.ok, true)
-  assert.equal(moved.receipt.sessions[0].strategy, 'rehome')
-  assert.deepEqual(await readFile(transcript), before)
-  assert.equal((await stat(transcript)).ino, beforeStat.ino)
-  assert.equal((await accounts(h.paths)).find(row => row.account === h.acct.P).sessions.length, 0)
+  for (const [type, key, file] of [
+    ['text', 'content', { filePath: '/tmp/fixture.txt', content: 'full file body', numLines: 1 }],
+    ['image', 'base64', { base64: Buffer.alloc(96 * 1024, 0xab).toString('base64'), dimensions: { width: 256, height: 128 }, originalSize: 96 * 1024, type: 'image/png' }]
+  ]) {
+    const h = await home()
+    const parent = entry('assistant', 1, null, SOURCE)
+    const full = entry('user', 2, 1, SOURCE, { toolUseResult: { type, file } })
+    const replay = { ...full, toolUseResult: { ...full.toolUseResult, file: { ...file, [key]: '' } } }
+    await h.write(SOURCE, [parent, full, replay])
+    await h.record('P', SOURCE, rehomeRecord({ title: 'Replayed file read' }))
+    await h.write(id(991), fork([parent, replay], SOURCE, id(991), 'Poorer fork'))
+    await h.record('T', id(991), rehomeRecord({ title: 'Poorer fork' }))
+    const all = await accounts(h.paths), from = all.find(row => row.account === h.acct.P), to = all.find(row => row.account === h.acct.T)
+    const transcript = path.join(h.project, `${SOURCE}.jsonl`)
+    const before = await readFile(transcript), beforeStat = await stat(transcript)
+    const inv = await inventory([from], to, h.paths)
+    assert.equal(inv.blocked.length, 0)
+    assert.equal(inv.there.length, 0)
+    assert.equal(inv.move.length, 1)
+    const moved = await move(inv, to, h.paths)
+    assert.equal(moved.ok, true)
+    assert.equal(moved.receipt.sessions[0].strategy, 'rehome')
+    assert.deepEqual(await readFile(transcript), before)
+    assert.equal((await stat(transcript)).ino, beforeStat.ino)
+    assert.equal((await accounts(h.paths)).find(row => row.account === h.acct.P).sessions.length, 0)
+  }
 })
 
 test('semantic change detection keeps richer output and parse state', () => {
   const a = entry('user', 1, null, id(0))
   const plain = entry('user', 2, 1, id(0), { toolUseResult: { stdout: '', stderr: '' } })
   const rich = { ...plain, toolUseResult: { stdout: 'finished', stderr: '' } }
+  assert.equal(semantic([a, plain, rich], id(0)), '79163d4f82bf5ea15a60aa7fd8993e49fb2788ca942eca14951f5796bc5a113c')
   assert.notEqual(semantic([a, plain], id(0)), semantic([a, rich], id(0)))
   assert.notEqual(semantic([a, rich], id(0)), semantic([a, rich], id(0), 1))
   const before = [a, rich, { type: 'relocated', sessionId: id(0), relocatedCwd: '/before' }]
@@ -2007,6 +2079,216 @@ test('completed local movement suppresses speculative pending', async () => {
   ])
   assert.equal(idle.nothing, true)
   assert.equal(JSON.parse(await readFile(result.file)).cloudError, cloudError)
+})
+
+test('known source mirrors stay queued after local retirement and only finish under their source login', async () => {
+  for (const source of ['record', 'transcript', 'local-only']) {
+    const h = await home(), entries = branchEntries(2, SOURCE, 1)
+    await h.write(SOURCE, [...entries, ...(source === 'transcript' ? [{ type: 'bridge-session', sessionId: SOURCE, bridgeSessionId: 'cse_known' }] : [])])
+    await h.record('T', SOURCE, rehomeRecord({ bridgeSessionIds: source === 'transcript' ? [] : ['session_known'] }))
+    const all = await accounts(h.paths), from = all.find(a => a.account === h.acct.T), to = all.find(a => a.account === h.acct.Z)
+    const inv = await inventory([from], to, h.paths, () => {}, { cloudRequested: source !== 'local-only', cloud: source === 'local-only' ? null : cloudFixture(h, { account: to.account, org: to.org, list: async () => assert.fail('destination login must not list the source') }) })
+    const moved = await move(inv, to, h.paths)
+    assert.equal(moved.ok, true)
+    assert.deepEqual(await readdir(h.dir('T')), [])
+    if (source === 'local-only') { assert.equal(moved.pendingCloud, 0); continue }
+    assert.equal(moved.pendingCloud, 1)
+    assert.equal(moved.complete, false)
+    assert.deepEqual(moved.receipt.cloudChecks[0].sessionIds, ['session_known'])
+    const placed = moved.receipt.sessions[0].record
+    await writeFile(placed, JSON.stringify({ ...JSON.parse(await readFile(placed)), isArchived: true }))
+    const snapshot = await fixtureSnapshot(h, [h.paths.records, h.paths.pool])
+    const pending = lines((await cli(h.root, ['accounts', '--json'])).stdout)[0].find(a => a.account === from.account)
+    assert.equal(pending.pendingAction, 'sign-in')
+    let reads = 0, status = 'active'
+    const cloud = cloudFixture(h, { account: from.account, org: from.org,
+      list: async () => { reads++; return ['cse_known', 'cse_unrelated'].map(id => remoteSession({ id, title: 'Remote title', status })) },
+      eventRows: async id => { assert.equal(id, 'cse_known'); return remoteRows(entries) },
+      session: async id => { assert.equal(id, 'cse_known'); return remoteState(status) },
+      archive: async id => { assert.equal(id, 'cse_known'); status = 'archived' }
+    })
+    const waiting = await sweep(h.paths, { active: to, processes: [], cloud })
+    assert.equal(waiting.pending, true)
+    assert.equal(reads, 0)
+    const finished = await sweep(h.paths, { active: from, processes: [], cloud })
+    assert.equal(finished.ok, true)
+    assert.equal(finished.result.complete, true)
+    assert.equal(finished.result.file, moved.file)
+    assert.equal(finished.result.cloudArchived, 1)
+    assert.equal(status, 'archived')
+    assert.deepEqual(await fixtureSnapshot(h, [h.paths.records, h.paths.pool]), snapshot)
+  }
+})
+
+test('held continuations merge new mirror scopes without reopening unchanged or cancelled checks', async () => {
+  for (const [status, scoped, added] of [
+    ['pending', true, true], ['complete', true, true], ['pending', false, true], ['complete', false, true],
+    ['complete', true, false], ['cancelled', true, true]
+  ]) {
+    const h = await home(), cold = id(809), coldEntries = branchEntries(2, cold, 501), heldEntries = branchEntries(2, SOURCE, 511)
+    await h.write(cold, coldEntries)
+    await h.write(SOURCE, heldEntries)
+    await h.record('P', cold, rehomeRecord({ bridgeSessionIds: ['session_cold'] }))
+    await h.record('P', SOURCE, rehomeRecord({ isArchived: true, bridgeSessionIds: [added ? 'session_held' : 'session_cold'] }))
+    const all = await accounts(h.paths), from = all.find(a => a.account === h.acct.P), to = all.find(a => a.account === h.acct.T)
+    const moved = await executeMove([from], to, h.paths, { cloudRequested: true, moveOnly: true, processes: desktopFixture() })
+    assert.equal(moved.receipt.held.length, 1)
+    const check = moved.receipt.cloudChecks[0]
+    assert.deepEqual(check.sessionIds, ['session_cold'])
+    check.status = status
+    if (!scoped) delete check.sessionIds
+    await writeFile(moved.file, JSON.stringify(moved.receipt))
+    const resumed = await finishHeld(h.paths, { processes: [] })
+    assert.equal(resumed.receipt.sessions.length, 2)
+    const pending = status === 'pending' || status === 'complete' && added
+    assert.equal(resumed.receipt.cloudChecks[0].status, pending ? 'pending' : status)
+    assert.deepEqual(resumed.receipt.cloudChecks[0].sessionIds, scoped ? ['session_cold', ...(added && status !== 'cancelled' ? ['session_held'] : [])] : undefined)
+    if (!pending) { assert.equal(resumed.pendingCloud, 0); continue }
+    const states = { cse_cold: status === 'complete' ? 'archived' : 'active', cse_held: 'active' }
+    const cloud = cloudFixture(h, {
+      list: async () => [...Object.entries(states).map(([id, status]) => remoteSession({ id, status })), ...(scoped ? [remoteSession({ id: 'cse_unrelated' })] : [])],
+      eventRows: async id => { assert.ok(Object.hasOwn(states, id)); return remoteRows(id === 'cse_cold' ? coldEntries : heldEntries) },
+      session: async id => { assert.ok(Object.hasOwn(states, id)); return remoteState(states[id]) },
+      archive: async id => { assert.ok(Object.hasOwn(states, id)); states[id] = 'archived' }
+    })
+    const finished = await finishPending(h.paths, { cloud })
+    assert.equal(finished.ok, true)
+    assert.equal(finished.complete, true)
+    assert.deepEqual(Object.values(states), ['archived', 'archived'])
+  }
+})
+
+test('round trips keep transcript mirrors with their explicit account and organization across cache generations', async () => {
+  for (const sameLogin of [false, true]) for (const cache of ['cold', 'warm', 'legacy']) {
+    const h = await home(), entries = branchEntries(2, SOURCE, 1)
+    if (sameLogin) { h.acct.T = h.acct.P; await mkdir(h.dir('T'), { recursive: true }) }
+    await h.write(SOURCE, [...entries, { type: 'bridge-session', sessionId: SOURCE, bridgeSessionId: 'session_prior_owner', ownerAccountUuid: h.acct.P, ownerOrganizationUuid: h.org.P }])
+    await h.record('P', SOURCE, rehomeRecord({ bridgeSessionIds: ['session_prior_owner'] }))
+    const all = await accounts(h.paths), from = all.find(a => a.account === h.acct.P && a.org === h.org.P), to = all.find(a => a.account === h.acct.T && a.org === h.org.T)
+    let status = 'active'
+    const cloud = cloudFixture(h, {
+      list: async () => [remoteSession({ id: 'cse_prior_owner', title: 'Old source', status })],
+      session: async () => remoteState(status), eventRows: async () => remoteRows(entries), archive: async () => { status = 'archived' }
+    })
+    const first = await move(await inventory([from], to, h.paths, () => {}, { cloudRequested: true, cloud, writeCache: cache !== 'cold' }), to, h.paths)
+    assert.equal(first.pendingCloud, 0)
+    assert.equal(status, 'archived')
+    if (cache === 'legacy') {
+      const file = path.join(h.paths.state, 'cache.json'), stored = JSON.parse(await readFile(file))
+      for (const row of Object.values(stored.histories)) delete row.value.result.bridgeOwners
+      await writeFile(file, JSON.stringify(stored))
+    }
+    const current = await accounts(h.paths), source = current.find(a => a.account === to.account && a.org === to.org), target = current.find(a => a.account === from.account && a.org === from.org)
+    const inv = await inventory([source], target, h.paths, () => {}, { cloudRequested: true, cloud })
+    assert.ok(inv.cacheStats[cache === 'warm' ? 'historyHits' : 'historyMisses'] > 0)
+    const second = await move(inv, target, h.paths)
+    assert.equal(second.ok, true)
+    assert.equal(second.pendingCloud, 0)
+    assert.deepEqual(second.receipt.cloudLinks, [])
+  }
+})
+
+test('task and restarted moves retain known mirror cleanup and Keep completed can cancel it', async () => {
+  for (const restart of [false, true]) {
+    const h = await taskFamilyFixture(), { io } = taskHarness()
+    await h.record('P', SOURCE, rehomeRecord({ bridgeSessionIds: ['session_task_mirror'] }))
+    const { from, to } = await h.selection(), cloud = cloudFixture(h, { account: to.account, org: to.org, list: async () => assert.fail('wrong source login') })
+    const options = { cloudRequested: true, cloud, ...(restart ? { io } : { processes: [] }) }
+    let moved = await executeMove([from], to, h.paths, options)
+    if (restart) {
+      assert.deepEqual(moved.plan.deferredCloudSources, [])
+      moved = await executeMove([from], to, h.paths, { ...options, approve: moved.plan.token })
+      assert.equal(moved.restarted, true)
+    }
+    assert.equal(moved.ok, true)
+    assert.equal(moved.receipt.sessions.length, 4)
+    assert.equal(moved.pendingCloud, 1)
+    assert.deepEqual(moved.receipt.cloudChecks[0].sessionIds, ['session_task_mirror'])
+    assert.equal(moved.complete, false)
+    const kept = await keepLocal(h.paths)
+    assert.equal(kept.cancelled, 1)
+    assert.equal(kept.complete, true)
+    assert.equal((await sweep(h.paths, { active: from, processes: [], cloud })).complete, true)
+  }
+})
+
+test('deferred mirror links follow a recorded rewind and preserve its remote-only branch before archival', async () => {
+  const h = await home(), current = id(797), oldEntries = branchEntries(2, SOURCE, 1)
+  await h.write(SOURCE, oldEntries)
+  await h.record('T', SOURCE, rehomeRecord({ bridgeSessionIds: ['session_rewound'] }))
+  const all = await accounts(h.paths), from = all.find(a => a.account === h.acct.T), to = all.find(a => a.account === h.acct.Z)
+  const moved = await move(await inventory([from], to, h.paths, () => {}, { cloudRequested: true }), to, h.paths)
+  const row = moved.receipt.sessions[0], original = await readFile(row.targetTranscript)
+  await h.write(current, branchEntries(1, current, 51))
+  await writeFile(row.record, JSON.stringify({ ...JSON.parse(await readFile(row.record)), cliSessionId: current, priorCliSessionIds: [SOURCE], bridgeSessionIds: [], title: 'Renamed after rewind' }))
+  const record = await readFile(row.record), transcript = await readFile(path.join(h.project, `${current}.jsonl`))
+  let status = 'active'
+  const cloud = cloudFixture(h, { account: from.account, org: from.org,
+    list: async () => [remoteSession({ id: 'cse_rewound', title: 'Remote title', status })], eventRows: async () => remoteRows([...oldEntries, entry('assistant', 4, 2, SOURCE)]),
+    session: async () => remoteState(status), archive: async () => { status = 'archived' }
+  })
+  const finished = await finishPending(h.paths, { cloud })
+  assert.equal(finished.ok, true)
+  assert.equal(finished.rescued, 1)
+  assert.equal(finished.cloudArchived, 1)
+  assert.equal(finished.complete, true)
+  assert.equal(status, 'archived')
+  assert.deepEqual(await readFile(row.record), record)
+  assert.deepEqual(await readFile(row.targetTranscript), original)
+  assert.deepEqual(await readFile(path.join(h.project, `${current}.jsonl`)), transcript)
+})
+
+test('recorded retained histories allow mirror cleanup without cloning task-owned rewinds', async () => {
+  for (const scenario of ['retained', 'changed', 'uncached-analysis', 'cached-analysis', 'missing', 'unrecorded', 'malformed']) {
+    const h = await home(), current = id(798), entries = branchEntries(2, SOURCE, 1)
+    await h.write(SOURCE, entries)
+    await h.record('T', SOURCE, rehomeRecord({ bridgeSessionIds: ['session_retained'] }))
+    const all = await accounts(h.paths), from = all.find(a => a.account === h.acct.T), to = all.find(a => a.account === h.acct.Z)
+    const moved = await move(await inventory([from], to, h.paths, () => {}, { cloudRequested: true, writeCache: scenario === 'cached-analysis' }), to, h.paths)
+    const row = moved.receipt.sessions[0]
+    await h.write(current, branchEntries(1, current, 51))
+    await writeFile(row.record, JSON.stringify({ ...JSON.parse(await readFile(row.record)), cliSessionId: current, bridgeSessionIds: [], priorCliSessionIds: scenario === 'unrecorded' ? [] : scenario === 'malformed' ? SOURCE : [SOURCE] }))
+    await writeFile(to.taskFile, JSON.stringify({ scheduledTasks: [{ id: 'retained-task', enabled: true, notifySessionId: row.targetRecordId }] }))
+    if (scenario === 'missing') await unlink(row.targetTranscript)
+    const record = await readFile(row.record), tasks = await readFile(to.taskFile)
+    let status = 'active', reads = 0
+    const cloud = cloudFixture(h, { account: from.account, org: from.org,
+      list: async () => [remoteSession({ id: 'cse_retained', title: 'Older remote title', status })],
+      eventRows: async () => { if (++reads === 3 && scenario === 'changed') await appendFile(row.targetTranscript, '{}\n'); return remoteRows(entries) },
+      session: async () => remoteState(status), archive: async () => { status = 'archived' }
+    })
+    const originalRead = fs.readFile, originalStat = fs.stat
+    let changedDuringAnalysis = false, transcriptReads = 0
+    fs.readFile = async (file, ...args) => {
+      const bytes = await originalRead(file, ...args)
+      if (file === row.targetTranscript && ++transcriptReads === 2 && scenario === 'uncached-analysis') {
+        await h.write(SOURCE, [entry('user', 777, null, SOURCE)])
+        changedDuringAnalysis = true
+      }
+      return bytes
+    }
+    fs.stat = async (file, ...args) => {
+      const detail = await originalStat(file, ...args)
+      if (file === row.targetTranscript && scenario === 'cached-analysis' && !changedDuringAnalysis) {
+        await h.write(SOURCE, [entry('user', 777, null, SOURCE)])
+        changedDuringAnalysis = true
+      }
+      return detail
+    }
+    syncBuiltinESMExports()
+    let result
+    try { result = await finishPending(h.paths, { cloud }) }
+    finally { fs.readFile = originalRead; fs.stat = originalStat; syncBuiltinESMExports() }
+    assert.equal(changedDuringAnalysis, scenario.endsWith('-analysis'))
+    assert.equal(result.ok, scenario === 'retained', scenario)
+    assert.equal(result.complete, scenario === 'retained', scenario)
+    assert.equal(result.rescued, 0)
+    assert.equal(status, scenario === 'retained' ? 'archived' : 'active')
+    if (scenario === 'changed') assert.match(result.failed[0].error, /Retained local history changed/)
+    assert.deepEqual(await readFile(row.record), record)
+    assert.deepEqual(await readFile(to.taskFile), tasks)
+    assert.deepEqual((await readdir(h.dir('Z'))).sort(), [path.basename(row.record), 'scheduled-tasks.json'].sort())
+  }
 })
 
 test('a late move failure restores the source cloud check', async () => {
@@ -5446,20 +5728,50 @@ test('rehome retirement allows shared growth without duplicate records', async (
   assert.ok((await readFile(transcript, 'utf8')).includes('message 2'))
 })
 
-test('a corrupt planning cache is ignored', async () => {
-  const h = await home()
-  const teamDir = path.join(h.paths.records, h.acct.P, h.org.T)
-  await mkdir(teamDir, { recursive: true })
-  await h.write(SOURCE, [entry('user', 1, null, SOURCE)])
-  await h.record('P', SOURCE, rehomeRecord())
-  await mkdir(h.paths.state, { recursive: true })
-  await writeFile(path.join(h.paths.state, 'cache.json'), '{broken')
-  const all = await accounts(h.paths)
-  const from = all.find((a) => a.account === h.acct.P && a.org === h.org.P)
-  const to = all.find((a) => a.account === h.acct.P && a.org === h.org.T)
-  const inv = await inventory([from], to, h.paths)
-  assert.equal(inv.move.length, 1)
-  assert.ok(inv.cacheStats.historyMisses > 0)
+test('corrupt and legacy planning caches refresh replay analysis', async () => {
+  for (const state of ['corrupt', 'legacy']) {
+    const h = await home()
+    const teamDir = path.join(h.paths.records, h.acct.P, h.org.T)
+    await mkdir(teamDir, { recursive: true })
+    const parent = entry('assistant', 1, null, SOURCE)
+    const full = entry('user', 2, 1, SOURCE, { toolUseResult: { type: 'image', file: { base64: Buffer.from('synthetic image bytes').toString('base64'), dimensions: { width: 1, height: 1 }, originalSize: 21, type: 'image/png' } } })
+    const replay = { ...full, toolUseResult: { ...full.toolUseResult, file: { ...full.toolUseResult.file, base64: '' } } }
+    const edits = [3, 4, 5, 6].flatMap(k => {
+      const original = entry('attachment', k, 2, SOURCE, { attachment: { type: 'edited_text_file', filename: `/tmp/fixture-${k}.txt`, snippet: `synthetic edit ${k}` } })
+      return [original, { ...original, attachment: { ...original.attachment, displayPath: `fixture-${k}.txt` } }]
+    })
+    const entries = [parent, full, replay, ...edits]
+    assert.equal(normalize(entries).replays, 5)
+    await h.write(SOURCE, entries)
+    await h.record('P', SOURCE, rehomeRecord())
+    const transcript = path.join(h.project, `${SOURCE}.jsonl`), before = await readFile(transcript)
+    const all = await accounts(h.paths)
+    const from = all.find((a) => a.account === h.acct.P && a.org === h.org.P)
+    const to = all.find((a) => a.account === h.acct.P && a.org === h.org.T)
+    await inventory([from], to, h.paths, () => {}, { writeCache: true, processes: [] })
+    const file = path.join(h.paths.state, 'cache.json'), stored = JSON.parse(await readFile(file))
+    stored.version = 8
+    for (const row of Object.values(stored.histories)) {
+      row.value.result.conflicts = 10
+      row.value.result.comparable = false
+    }
+    await writeFile(file, state === 'corrupt' ? '{broken' : JSON.stringify(stored))
+    const inv = await inventory([from], to, h.paths, () => {}, { writeCache: true, processes: [] })
+    assert.equal(inv.blocked.length, 0)
+    assert.equal(inv.move.length, 1)
+    assert.equal(inv.cacheStats.historyHits, 0)
+    assert.ok(inv.cacheStats.historyMisses > 0)
+    const refreshed = JSON.parse(await readFile(file))
+    assert.equal(refreshed.version, 9)
+    assert.equal(refreshed.semanticVersion, 3)
+    assert.ok(Object.values(refreshed.histories).every(row => row.value.result.conflicts === 0 && row.value.result.comparable))
+    const warm = await inventory([from], to, h.paths, () => {}, { processes: [] })
+    assert.equal(warm.blocked.length, 0)
+    assert.equal(warm.move.length, 1)
+    assert.ok(warm.cacheStats.historyHits > 0)
+    assert.equal(warm.cacheStats.historyMisses, 0)
+    assert.deepEqual(await readFile(transcript), before)
+  }
 })
 
 test('an interrupted rehome removes only its unchanged target record', async () => {
@@ -6216,6 +6528,37 @@ struct StateChecks {
                 return row
             }), encoding: .utf8)!
         }
+        requests = []
+        let picker = Model(demo: Demo.accounts)
+        picker.selectTarget(Demo.accounts[2].id)
+        picker.toggle(Demo.accounts[0].id)
+        for id in Array(picker.from) { picker.toggle(id) }
+        precondition(picker.from.isEmpty)
+        picker.selectTarget(Demo.accounts[2].id)
+        precondition(picker.from == Set(Demo.accounts.map(\.id)).subtracting([Demo.accounts[2].id]))
+        picker.toggle(Demo.accounts[0].id)
+        picker.selectTarget(Demo.accounts[3].id)
+        precondition(!picker.from.contains(Demo.accounts[0].id))
+        picker.reset()
+        precondition(picker.from.isEmpty && picker.to == nil && !picker.ready && picker.note.isEmpty)
+        precondition(requests.count == 1 && requests[0].0 == ["accounts", "--json"])
+        requests[0].1(accountResponse(false))
+        requests[0].2(0, "")
+        precondition(picker.from.isEmpty && picker.to == nil)
+        picker.toggle(Demo.accounts[0].id)
+        precondition(picker.from == [Demo.accounts[0].id] && picker.to == nil)
+        picker.selectTarget(Demo.accounts[2].id)
+        precondition(picker.from == [Demo.accounts[0].id] && picker.ready)
+        picker.reset()
+        picker.selectTarget(Demo.accounts[3].id)
+        precondition(picker.from == Set(Demo.accounts.map(\.id)).subtracting([Demo.accounts[3].id]))
+        picker.begin()
+        picker.reset()
+        precondition(picker.running && picker.to == Demo.accounts[3].id)
+        let pendingPicker = Model(demo: try! JSONDecoder().decode([Account].self, from: Data(accountResponse(true).utf8)))
+        let pendingSelection = pendingPicker.to
+        pendingPicker.reset()
+        precondition(pendingPicker.to == pendingSelection && !pendingPicker.pendingAccounts.isEmpty)
         let corruptedAccounts = String(data: Data(base64Encoded: "CORRUPTED_CHECKPOINT_ACCOUNTS")!, encoding: .utf8)!
         let repairedAccounts = String(data: Data(base64Encoded: "REPAIRED_CHECKPOINT_ACCOUNTS")!, encoding: .utf8)!
         let discoveredAccounts = try! JSONDecoder().decode([Account].self, from: Data(corruptedAccounts.utf8))
