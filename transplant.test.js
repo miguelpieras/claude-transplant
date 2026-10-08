@@ -6769,10 +6769,10 @@ test('Swift preserves command, progress, metadata, and completion states', async
   const recoveryAccounts = await cli(h.root, ['accounts', '--json'])
   assert.equal(recoveryAccounts.code, 0)
   let source = (await readFile(path.join(here, 'menubar.swift'), 'utf8')).split('@main\nstruct TransplantApp: App {')[0]
-  const start = source.indexOf('    private func run(_ args: [String]')
+  const start = source.indexOf('    func run(_ args: [String]')
   const end = source.indexOf('\nstruct RowKey: PreferenceKey', start)
   assert.ok(start > 0 && end > start)
-  source = source.slice(0, start) + `    private func run(_ args: [String], line: @escaping (String) -> Void, done: @escaping (Int32, String) -> Void) {
+  source = source.slice(0, start) + `    func run(_ args: [String], line: @escaping (String) -> Void, done: @escaping (Int32, String) -> Void) {
         requests.append((args, line, done))
     }
 }
@@ -7156,7 +7156,7 @@ struct StateChecks {
   source = source.replace('REPAIRED_CHECKPOINT_ACCOUNTS', Buffer.from(checkpointAccounts.repaired).toString('base64'))
   const file = path.join(root, 'checks.swift'), binary = path.join(root, 'checks')
   await writeFile(file, source)
-  await promisify(execFile)('/usr/bin/swiftc', ['-parse-as-library', '-o', binary, file], { timeout: 90_000 })
+  await promisify(execFile)('/usr/bin/swiftc', ['-parse-as-library', '-o', binary, file, path.join(here, 'workflow.swift')], { timeout: 90_000 })
   const { stdout } = await promisify(execFile)(binary, [], { timeout: 15_000 })
   assert.match(stdout, /Swift queue and metadata states passed/)
 })

@@ -23,30 +23,35 @@ const TASK_FAMILY_BLOCKED = 'scheduled task family blocked by'
 const desktopExecutable = (file) => typeof file === 'string' && file.endsWith('/Claude.app/Contents/MacOS/Claude')
 const RESTART_BUDGET = 30_000
 const REOPEN_RESERVE = 8_000
-const LABEL = 'io.github.vitaliyhayda.claude-transplant'
+const LABEL = 'io.github.miguelpieras.claude-transplant-resume'
 const SEMANTIC_VERSION = 3
 const CACHE_VERSION = 11
 const RUNTIME_KEYS = ['slug', 'promptId', 'parentUuid', 'version', 'cwd', 'gitBranch']
 const MESSAGE_RUNTIME_KEYS = ['id', 'usage', 'diagnostics', 'stop_reason', 'stop_sequence', 'stop_details']
 const RECORD_RUNTIME_KEYS = ['lastActivityAt', 'lastFocusedAt', 'completedTurns', 'error', 'errorAt', 'priorErrorMark', 'lastSpawnRootDetected', 'promptAppendSnapshot', 'reportFindingsCard', 'scratchPromptRecents', 'writtenBranches', 'prs']
 const REMOTE_TAGS = new Set(['remote-control-sdk', 'remote-control-repl'])
-const HELP = `claude-transplant   move Claude Code history between accounts
+const HELP = `claude-transplant-resume   move Claude Code history between accounts
 
-  claude-transplant             pick from → to, move, retire the source entries, print receipt
-  claude-transplant --dry-run   plan only, write nothing, refuses while a move or recovery is pending
-  claude-transplant undo        restore source entries and task registrations, with restart approval if needed
-  claude-transplant finish      recover interrupted transfers, finish held records or active-source cloud work
-  claude-transplant keep-local  cancel held work and cloud checks, keep completed moves
-  claude-transplant accounts    list accounts
-  claude-transplant restart     plan an explicit Desktop restart
-  claude-transplant sweep       verify placed metadata and retry the active pending source
-  claude-transplant menubar     install the menubar app, --snapshot <png>, --remove uninstalls
+  claude-transplant-resume             pick from → to, move, retire the source entries, print receipt
+  claude-transplant-resume --dry-run   plan only, write nothing, refuses while a move or recovery is pending
+  claude-transplant-resume undo        restore source entries and task registrations, with restart approval if needed
+  claude-transplant-resume finish      recover interrupted transfers, finish held records or active-source cloud work
+  claude-transplant-resume keep-local  cancel held work and cloud checks, keep completed moves
+  claude-transplant-resume accounts    list accounts
+  claude-transplant-resume restart     plan an explicit Desktop restart
+  claude-transplant-resume sweep       verify placed metadata and retry the active pending source
+  claude-transplant-resume menubar     install the menubar app, --snapshot <png>, --remove uninstalls
+  claude-transplant-resume local-source --source <account/org>  choose all local source conversations
+  claude-transplant-resume local-plan  show the current destination and continuation candidates
+  claude-transplant-resume local-move --restart-approved <token>  execute that local plan
+  claude-transplant-resume local-status  check assistant activity after a resume attempt
 
   --from <match> --to <match>   skip the picker, match on email, org name, or uuid prefix
   --cloud                       reconcile active source, queue remaining local work and known source mirrors
   --move-only                   move eligible records without restarting Desktop
   --restart-approved <token>    execute the exact restart plan previously displayed
   --json                        machine-readable output
+  --no-resume                   move records only in the local workflow
   --version
 `
 
@@ -372,7 +377,7 @@ export function layout(home = os.homedir()) {
     login: path.join(home, '.claude.json'),
     backups: path.join(home, '.claude/backups'),
     switchAccounts: path.join(home, '.claude-switch/accounts'),
-    state: path.join(support, 'claude-transplant')
+    state: path.join(support, 'claude-transplant-resume')
   }
 }
 
@@ -509,7 +514,7 @@ async function quarantine(items, dest) {
   }
 }
 
-async function locked(paths, work) {
+export async function locked(paths, work) {
   await mkdir(paths.state, { recursive: true })
   const lockFile = path.join(paths.state, 'lock')
   const guard = spawn('/usr/bin/lockf', ['-k', '-s', '-w', '-t', '0', lockFile, '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -647,6 +652,7 @@ async function logins(paths) {
   const emails = new Map()
   const orgs = new Map()
   const pairs = new Map()
+  const identities = await readJson(path.join(paths.state, 'identities.json')).catch(() => ({ accounts: {} }))
   const take = async (file) => {
     const a = (await readJson(file).catch(() => ({}))).oauthAccount
     if (a?.accountUuid && a.emailAddress) emails.set(a.accountUuid, a.emailAddress)
@@ -669,7 +675,49 @@ async function logins(paths) {
       if (r.emailAddress) emails.set(account, r.emailAddress)
     }
   }
-  return { emails, orgs, pairs }
+  for (const [account, identity] of Object.entries(identities.accounts ?? {})) {
+    if (!UUID.test(account)) continue
+    if (typeof identity.email === 'string') emails.set(account, identity.email)
+    for (const item of identity.organizations ?? []) {
+      if (!UUID.test(item.org ?? '')) continue
+      orgs.set(item.org, item.label)
+      pairs.set(`${account}/${item.org}`, { account, org: item.org })
+    }
+  }
+  return { emails, orgs, pairs, identities }
+}
+
+export function accountIdentity(identity) {
+  if (!UUID.test(identity?.account ?? '') || typeof identity.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity.email)) throw new Error('Account name could not be verified')
+  const organizations = (identity.organizations ?? []).filter(item => UUID.test(item.org ?? '') && item.capabilities?.includes('chat')).map(item => {
+    const max = item.capabilities.includes('claude_max')
+    const pro = item.capabilities.includes('claude_pro')
+    const personal = max || pro
+    return { org: item.org, label: max ? 'Personal Max' : pro ? 'Personal Pro' : item.name || short(item.org), personal }
+  })
+  return { email: identity.email, organizations, checkedAt: new Date().toISOString() }
+}
+
+export async function refreshAccountIdentity(paths, current) {
+  if (current.state !== 'known') return
+  const file = path.join(paths.state, 'identities.json')
+  const cache = await readJson(file).catch(() => ({ accounts: {} }))
+  const known = cache.accounts?.[current.account]
+  if (known?.organizations?.some(item => item.org === current.org) && Date.parse(known.checkedAt) >= Date.parse(current.at ?? 0) && Date.now() - Date.parse(known.checkedAt) < 300_000) return
+  if (cache.attempt?.account === current.account && cache.attempt.org === current.org && Date.now() - cache.attempt.at < 120_000) return
+  cache.accounts ??= {}
+  cache.attempt = { account: current.account, org: current.org, at: Date.now() }
+  try {
+    const client = await cloudClient(paths, current)
+    const identity = accountIdentity(client.identity)
+    if (!identity.organizations.some(item => item.org === current.org)) throw new Error('Selected plan is not a Claude chat organization')
+    cache.accounts[current.account] = identity
+    delete cache.error
+  } catch (error) { cache.error = error.message }
+  await mkdir(paths.state, { recursive: true })
+  const temporary = `${file}.${randomUUID()}.tmp`
+  await writeFile(temporary, jsonText(cache), { mode: 0o600 })
+  await rename(temporary, file)
 }
 
 function ago(ms) {
@@ -893,9 +941,11 @@ const desktopSession = (file, record) => ({
   record
 })
 
-export async function accounts(paths, processes = null) {
-  const { emails, orgs, pairs } = await logins(paths)
+export async function accounts(paths, processes = null, { verifyIdentity = false } = {}) {
   const cur = await signedIn(paths, processes)
+  if (verifyIdentity && processes === null) await refreshAccountIdentity(paths, cur)
+  const { emails, orgs, pairs, identities } = await logins(paths)
+  if (cur.state === 'known') pairs.set(`${cur.account}/${cur.org}`, { account: cur.account, org: cur.org })
   const out = []
   const stored = await records(paths.records)
   const known = [...pairs.values()].filter((pair) => !stored.some((row) => sameAccount(row, pair))).map(({ account, org }) => ({ account, org, dir: path.join(paths.records, account, org), files: [] }))
@@ -917,7 +967,10 @@ export async function accounts(paths, processes = null) {
     const label = `${email ?? short(account)} · ${orgName ?? short(org)}`
     const base = sessions.length ? `${sessions.length} | ${ago(activeAt)} | ${mode(sessions.map((s) => path.basename(s.cwd)))}` : '0 | -'
     const stats = `${base}${unreadable.length ? ` | ${unreadable.length} unreadable` : ''}${taskError ? ' | task registry unreadable' : ''}`
-    out.push({ account, org, dir, email, orgName, sessions, allSessions: sessions, unreadable, taskFile, taskSessions: scheduled, taskError, activeAt, focusedAt: Math.max(0, ...sessions.map((s) => s.focusedAt)), label, stats, active: false, signedIn: account === cur.account, identityState: cur.state })
+    const identity = identities.accounts?.[account]?.organizations?.find(item => item.org === org)
+    const checkedAt = Date.parse(identities.accounts?.[account]?.checkedAt)
+    const identityKnown = Boolean(identity) && (account !== cur.account || checkedAt >= Date.parse(cur.at ?? 0) && Date.now() - checkedAt < 300_000)
+    out.push({ account, org, dir, email, orgName, sessions, allSessions: sessions, unreadable, taskFile, taskSessions: scheduled, taskError, activeAt, focusedAt: Math.max(0, ...sessions.map((s) => s.focusedAt)), label, stats, active: false, signedIn: account === cur.account, identityState: cur.state, identityKnown, personal: identity?.personal === true })
   }
   const mine = out.filter((a) => a.account === cur.account)
   const chosen = mine.find((a) => a.org === cur.org)
@@ -4047,22 +4100,22 @@ const plist = (dict) => {
 }
 
 const compileMenubar = (source, binary) => {
-  const build = spawnSync('swiftc', ['-O', '-parse-as-library', '-o', binary, source], { encoding: 'utf8' })
+  const build = spawnSync('swiftc', ['-O', '-parse-as-library', '-o', binary, source, path.join(path.dirname(source), 'workflow.swift')], { encoding: 'utf8' })
   if (build.error) throw new Error('swiftc not found, run xcode-select --install')
   if (build.status !== 0) throw new Error(`swiftc failed\n${build.stderr.trim()}`)
 }
 
-async function menubar(paths, remove, snapshot) {
-  const app = path.join(paths.state, 'Claude Transplant.app')
-  const binary = path.join(app, 'Contents/MacOS/Claude Transplant')
+export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
+  const app = path.join(paths.state, 'Claude Transplant Resume.app')
+  const binary = path.join(app, 'Contents/MacOS/Claude Transplant Resume')
   const agent = path.join(paths.home, 'Library/LaunchAgents', `${LABEL}.plist`)
   const domain = `gui/${process.getuid()}`
   const stop = () => {
     spawnSync('launchctl', ['bootout', `${domain}/${LABEL}`])
-    spawnSync('pkill', ['-x', 'Claude Transplant'])
+    spawnSync('pkill', ['-x', 'Claude Transplant Resume'])
   }
   if (remove) {
-    stop()
+    if (launch) stop()
     await rm(app, { recursive: true, force: true })
     await rm(agent, { force: true })
     return 'menubar removed'
@@ -4072,7 +4125,7 @@ async function menubar(paths, remove, snapshot) {
     const output = path.resolve(snapshot)
     const scratch = await mkdtemp(path.join(os.tmpdir(), 'claude-transplant-snapshot-'))
     try {
-      const renderer = path.join(scratch, 'Claude Transplant')
+      const renderer = path.join(scratch, 'Claude Transplant Resume')
       compileMenubar(source, renderer)
       await mkdir(path.dirname(output), { recursive: true })
       const shot = spawnSync(renderer, ['--snapshot', output, '--node', process.execPath, '--script', path.join(HERE, 'transplant.js')], { encoding: 'utf8' })
@@ -4082,7 +4135,7 @@ async function menubar(paths, remove, snapshot) {
     }
     return `snapshot written | ${output}`
   }
-  const key = sha((await readFile(source, 'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
+  const key = sha((await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
   const built = path.join(app, 'Contents/Resources/build.sha256')
   if ((await readFile(built, 'utf8').catch(() => '')) !== key) {
     const fresh = `${app}.building`
@@ -4092,26 +4145,30 @@ async function menubar(paths, remove, snapshot) {
     const { version } = await readJson(path.join(HERE, 'package.json'))
     const info = {
       CFBundleIdentifier: LABEL,
-      CFBundleName: 'Claude Transplant',
-      CFBundleExecutable: 'Claude Transplant',
+      CFBundleName: 'Claude Transplant Resume',
+      CFBundleExecutable: 'Claude Transplant Resume',
       CFBundlePackageType: 'APPL',
       CFBundleShortVersionString: version,
       LSMinimumSystemVersion: '13.0',
       LSUIElement: true,
-      NSHighResolutionCapable: true
+      NSHighResolutionCapable: true,
+      NSAppleEventsUsageDescription: 'Claude Transplant Resume closes and reopens Claude when you move your conversations.'
     }
     await writeFile(path.join(fresh, 'Contents/Info.plist'), plist(info))
-    compileMenubar(source, path.join(fresh, 'Contents/MacOS/Claude Transplant'))
+    compileMenubar(source, path.join(fresh, 'Contents/MacOS/Claude Transplant Resume'))
     await writeFile(path.join(fresh, 'Contents/Resources/build.sha256'), key)
-    stop()
+    if (launch) stop()
     await rm(app, { recursive: true, force: true })
     await rename(fresh, app)
   }
   const script = path.join(app, 'Contents/Resources/transplant.js')
   await copyFile(path.join(HERE, 'transplant.js'), script)
+  await copyFile(path.join(HERE, 'local-workflow.mjs'), path.join(app, 'Contents/Resources/local-workflow.mjs'))
+  await copyFile(path.join(HERE, 'package.json'), path.join(app, 'Contents/Resources/package.json'))
   const config = jsonText({ node: process.execPath, script })
   await writeFile(path.join(paths.state, 'menubar.json'), config)
   await writeFile(path.join(app, 'Contents/Resources/menubar.json'), config)
+  if (!launch) return app
   stop()
   await mkdir(path.dirname(agent), { recursive: true })
   await writeFile(agent, plist({ Label: LABEL, ProgramArguments: [binary], RunAtLoad: true }))
@@ -4121,7 +4178,7 @@ async function menubar(paths, remove, snapshot) {
 }
 
 function parse(argv) {
-  const args = { from: [], to: null, cmd: null, dry: false, cloud: false, json: false, help: false, version: false, remove: false, snapshot: null, restartApproved: null, moveOnly: false }
+  const args = { from: [], to: null, cmd: null, dry: false, cloud: false, json: false, help: false, version: false, remove: false, snapshot: null, restartApproved: null, moveOnly: false, source: null, noResume: false }
   const value = (i) => { if (argv[i] === undefined || argv[i].startsWith('-')) throw new Error(`${argv[i - 1]} needs a value`); return argv[i] }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -4130,6 +4187,8 @@ function parse(argv) {
     else if (a === '--dry-run') args.dry = true
     else if (a === '--cloud') args.cloud = true
     else if (a === '--move-only') args.moveOnly = true
+    else if (a === '--source') args.source = value(++i)
+    else if (a === '--no-resume') args.noResume = true
     else if (a === '--restart-approved') args.restartApproved = value(++i)
     else if (a === '--json') args.json = true
     else if (a === '--remove') args.remove = true
@@ -4146,10 +4205,13 @@ function parse(argv) {
   if (['finish', 'undo'].includes(args.cmd) && (incompatible || args.cmd === 'undo' && args.moveOnly)) throw new Error(`${args.cmd} accepts only --json and --restart-approved`)
   if (args.restartApproved != null && !/^[a-f0-9]{64}$/.test(args.restartApproved)) throw new Error('restart approval token must be the one displayed by the engine')
   if (args.moveOnly && (args.restartApproved || args.dry || (args.cmd && args.cmd !== 'finish'))) throw new Error('--move-only applies only to a move or held continuation')
-  if (args.restartApproved && (args.dry || (args.cmd && !['restart', 'finish', 'undo'].includes(args.cmd)))) throw new Error('restart approval applies only to a move, finish, undo, or restart')
+  if (args.restartApproved && (args.dry || (args.cmd && !['restart', 'finish', 'undo', 'local-move'].includes(args.cmd)))) throw new Error('restart approval applies only to a move, finish, undo, or restart')
   if (args.cmd === 'restart' && incompatible) throw new Error('restart accepts only --json and --restart-approved')
   if (args.cmd === 'menubar' && (args.from.length || args.to || args.dry || args.cloud || args.json || (args.remove && args.snapshot))) throw new Error('menubar accepts only --remove or --snapshot <png>')
   if (args.cmd !== 'menubar' && (args.remove || args.snapshot)) throw new Error('--remove and --snapshot require menubar')
+  if (args.source !== null && args.cmd !== 'local-source') throw new Error('--source requires local-source')
+  if (args.cmd === 'local-source' && !args.source) throw new Error('local-source requires --source <account/org>')
+  if (args.noResume && !['local-plan','local-move'].includes(args.cmd)) throw new Error('--no-resume requires local-plan or local-move')
   return args
 }
 
@@ -4163,10 +4225,16 @@ async function main(argv) {
   const paths = layout()
   const out = process.stdout
   const emit = (o) => out.write(`${JSON.stringify(o)}\n`)
+  if (['local-source','local-plan','local-move','local-status','local-identity'].includes(args.cmd)) {
+    if (args.from.length || args.to || args.dry || args.cloud || args.moveOnly) throw new Error('Local workflow uses the verified signed-in Personal plan')
+    const {runLocal} = await import('./local-workflow.mjs')
+    return runLocal(paths,args.cmd,args.restartApproved,emit,{source:args.source,includeResume:!args.noResume})
+  }
+  if (!args.dry && !['accounts','menubar','restart'].includes(args.cmd) && await exists(path.join(paths.state,'local-workflow.json'))) throw new Error('This collection uses the local workflow. Use the menubar to move it back; inherited undo and move commands use separate receipts.')
   const showPlan = (plan) => {
     if (args.json) return emit({ plan: true, ...plan })
     const selection = plan.kind === 'undo' ? 'undo' : plan.kind === 'recover' ? 'finish' : plan.resume ? 'finish' : plan.selection ? `${plan.selection.from.map((a) => `--from "${a.account} ${a.org}"`).join(' ')} --to "${plan.selection.to.account} ${plan.selection.to.org}"` : 'restart'
-    out.write(`  restart     Claude Desktop must close before this operation\n  affected    ${[...new Set(plan.affected.map((row) => row.title))].join(', ') || 'no Code workers'}\n  approve     claude-transplant ${selection} --restart-approved ${plan.token}${args.cloud ? ' --cloud' : ''}\n`)
+    out.write(`  restart     Claude Desktop must close before this operation\n  affected    ${[...new Set(plan.affected.map((row) => row.title))].join(', ') || 'no Code workers'}\n  approve     claude-transplant-resume ${selection} --restart-approved ${plan.token}${args.cloud ? ' --cloud' : ''}\n`)
   }
   const showMove = async (result) => {
     const report = reporter(args.json)
@@ -4205,7 +4273,7 @@ async function main(argv) {
     ]
     if (troubles.length) out.write(`  failed      ${troubles.join('\n              ')}\n`)
     if (!file) return
-    out.write(`\n  receipt     ${file}\n  undo        npx claude-transplant undo\n${note ? `  then        ${note}\n` : ''}`)
+    out.write(`\n  receipt     ${file}\n  undo        claude-transplant-resume undo\n${note ? `  then        ${note}\n` : ''}`)
   }
   if (args.cmd === 'menubar') return out.write(`${await locked(paths, () => menubar(paths, args.remove, args.snapshot))}\n`)
   if (args.cmd === 'sweep') {
@@ -4356,7 +4424,7 @@ async function main(argv) {
       })
       const table = deferred ? processTable(paths.claudeApp) : []
       const summary = latest?.receipt ? receiptSummary(latest.receipt) : null
-      return emit(all.map(({ account, org, email, orgName, label, stats, active, signedIn, identityState, sessions, unreadable, activeAt }) => {
+      return emit(all.map(({ account, org, email, orgName, label, stats, active, signedIn, identityState, identityKnown, personal, sessions, unreadable, activeAt }) => {
         const source = deferred?.sources.find((candidate) => sameAccount(candidate, { account, org }))
         const waiting = source ? deferred.mode === 'local'
           ? waitingSessions({ held: deferred.receipt.held?.filter(held => held.sources.some(member => sameAccount(member, source))), cloudChecks: deferred.receipt.cloudChecks.filter(check => sameAccount(check, source)) })
@@ -4373,6 +4441,8 @@ async function main(argv) {
           active,
           signedIn,
           identityState,
+          identityKnown,
+          personal,
           sessions: sessions.length,
           unreadable: unreadable.length,
           activeAt,
@@ -4484,7 +4554,7 @@ const invoked = (() => {
 
 if (invoked) {
   main(process.argv.slice(2)).catch((error) => {
-    process.stderr.write(`claude-transplant: ${error.message}\n`)
+    process.stderr.write(`claude-transplant-resume: ${error.message}\n`)
     process.exitCode = error.code === 130 ? 130 : 1
   })
 }

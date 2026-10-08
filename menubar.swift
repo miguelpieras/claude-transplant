@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import UserNotifications
+import ApplicationServices
 
 struct Account: Decodable, Identifiable {
     let account: String
@@ -22,6 +23,9 @@ struct Account: Decodable, Identifiable {
     var receipt: String? = nil
     var receiptSummary: ReceiptSummary? = nil
     var recoveryProblem: RecoveryProblem? = nil
+    var sessions: Int? = nil
+    var identityKnown: Bool? = nil
+    var personal: Bool? = nil
     var id: String { account + "/" + org }
     var selector: String { account + " " + org }
     var name: String { email ?? String(account.prefix(8)) }
@@ -241,6 +245,16 @@ struct MoveProgress {
 @MainActor
 final class Model: ObservableObject {
     @Published var accounts: [Account] = []
+    @Published var flowPlan: LocalPlan?
+    @Published var flowNeedsSource = false
+    @Published var flowSource = ""
+    @Published var flowResume = true
+    var flowChoosingSource = false
+    @Published var flowError = ""
+    @Published var flowActionError = ""
+    @Published var flowBusy = false
+    var flowAlreadyRunning: Set<String> = []
+    var flowRefreshing = false
     @Published var from: Set<String> = []
     @Published var to: String?
     @Published var excluded: Set<String> = []
@@ -281,7 +295,7 @@ final class Model: ObservableObject {
     init(snapshot: Bool = false, config supplied: Config? = nil) {
         self.snapshot = snapshot
         demo = false
-        let file = Bundle.main.url(forResource: "menubar", withExtension: "json") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/claude-transplant/menubar.json")
+        let file = Bundle.main.url(forResource: "menubar", withExtension: "json") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/claude-transplant-resume/menubar.json")
         config = supplied ?? (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(Config.self, from: $0) }
         if snapshot {
             guard let config, let text = Model.capture(node(config.node), [config.script, "accounts", "--json"]), let decoded = try? JSONDecoder().decode([Account].self, from: Data(text.utf8)) else { snapshotFailed = true; return }
@@ -289,14 +303,13 @@ final class Model: ObservableObject {
             settle()
             return
         }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         refresh()
         poller = Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self, !self.running, !self.sweeping else { return }
             self.refresh()
         }
         progressTimer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect().sink { [weak self] _ in
-            guard let self, self.running else { return }
+            guard let self, self.running, !self.flowBusy else { return }
             self.moveProgress.refresh()
             self.badge = "\(self.moveProgress.percent)%"
         }
@@ -352,7 +365,7 @@ final class Model: ObservableObject {
             (account.pendingFailures ?? []).map { ("issue", identity($0.title, $0.id) + " | " + $0.error) }
         }
     }
-    var displaySummary: String { recoveryProblem != nil ? "The move receipt needs repair" : running ? progressLabel : note.isEmpty ? pendingPrompt : note }
+    var displaySummary: String { flowBusy ? note : recoveryProblem != nil ? "The move receipt needs repair" : running ? progressLabel : note.isEmpty ? pendingPrompt : note }
     var visibleCompletion: (summary: String, detail: String)? {
         canMutate && completion?.summary == note ? completion : nil
     }
@@ -442,9 +455,8 @@ final class Model: ObservableObject {
             accounts = list
             settle()
             let identity = list.filter { $0.active == true }.map(\.id).joined(separator: ",")
-            let changed = identity != activeIdentity
             activeIdentity = identity
-            if !snapshot && (changed || panelOpen || !pendingAccounts.isEmpty) { sweep() }
+            if !snapshot { refreshWorkflow() }
         }
     }
 
@@ -786,8 +798,8 @@ final class Model: ObservableObject {
         return found.isEmpty ? configured : found
     }
 
-    private func run(_ args: [String], line: @escaping (String) -> Void, done: @escaping (Int32, String) -> Void) {
-        guard let config else { done(1, "Menubar configuration is missing, run npx claude-transplant menubar"); return }
+    func run(_ args: [String], line: @escaping (String) -> Void, done: @escaping (Int32, String) -> Void) {
+        guard let config else { done(1, "Menubar configuration is missing, run claude-transplant-resume menubar"); return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: node(config.node))
         process.arguments = [config.script] + args
@@ -1020,15 +1032,19 @@ struct Panel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text("Claude Transplant").font(.system(.title3, design: .rounded, weight: .semibold))
+                Text("Claude Transplant Resume").font(.system(.title3, design: .rounded, weight: .semibold))
                 if let label = model.identityLabel { Tag(text: label, color: .gray) }
                 Spacer()
-                Button(action: { model.reset() }) { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    .accessibilityLabel("Reset").help("Clear account selections").disabled(model.running || !model.pendingAccounts.isEmpty)
+                Button(action: { model.refresh() }) { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    .accessibilityLabel("Refresh").disabled(model.running)
             }
-            accountBoard.disabled(!model.canMutate || !model.pendingAccounts.isEmpty)
+            if model.demo || model.snapshot {
+                accountBoard.disabled(!model.canMutate || !model.pendingAccounts.isEmpty)
+            } else {
+                WorkflowPanel().environmentObject(model)
+            }
             if !model.displaySummary.isEmpty { Divider() }
-            if model.running {
+            if model.running && !model.flowBusy {
                 Bar(value: model.moveProgress.value)
             }
             if let completion = model.visibleCompletion {
@@ -1055,7 +1071,7 @@ struct Panel: View {
                 Button(action: { model.restartDesktop() }) { Text("Restart Claude Desktop to see them").font(.callout.weight(.medium)).underline() }.buttonStyle(.plain)
                     .disabled(!model.canMutate)
             }
-            HStack(spacing: 10) {
+            if model.demo || model.snapshot { HStack(spacing: 10) {
                 if model.pendingAccounts.isEmpty {
                     Pill(title: "Move", prominent: true, enabled: model.ready) { model.move() }
                 } else {
@@ -1065,7 +1081,7 @@ struct Panel: View {
                 Pill(title: "Undo last", prominent: false, enabled: model.canMutate) { model.undo() }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.plain).foregroundStyle(.secondary)
-            }
+            } }
             HStack {
                 if model.skipRestartWarning {
                     Button("Show restart warnings", action: model.restoreRestartWarning).buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
@@ -1252,12 +1268,13 @@ struct MenuLabel: View {
 
     var body: some View {
         Image(nsImage: image)
-            .accessibilityLabel(badge.isEmpty ? "Claude Transplant" : badge + " complete")
+            .accessibilityLabel(badge.isEmpty ? "Claude Transplant Resume" : badge + " complete")
     }
 }
 
 @main
 struct TransplantApp: App {
+    @NSApplicationDelegateAdaptor(ControlPanelDelegate.self) private var appDelegate
     @StateObject private var model: Model
 
     init() {
@@ -1275,7 +1292,9 @@ struct TransplantApp: App {
             let file = args[index + 1]
             DispatchQueue.main.async { Snapshot.write(model, to: file) }
         } else {
-            _model = StateObject(wrappedValue: Model())
+            let model = Model()
+            _model = StateObject(wrappedValue: model)
+            ControlPanelDelegate.model = model
         }
     }
 
@@ -1284,7 +1303,7 @@ struct TransplantApp: App {
             Panel().environmentObject(model).environment(\.controlActiveState, .key).environment(\.colorScheme, .dark)
         } label: {
             MenuLabel(symbol: model.recoveryProblem == nil ? model.symbol : "exclamationmark.triangle", badge: model.recoveryProblem == nil ? model.badge : "")
-                .help(model.running ? "Estimated completion" : "Claude Transplant")
+                .help(model.running ? "Estimated completion" : "Claude Transplant Resume")
         }
         .menuBarExtraStyle(.window)
     }

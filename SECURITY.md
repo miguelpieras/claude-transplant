@@ -1,11 +1,11 @@
 # Security
 
-Report a vulnerability privately, never in a public issue, through the advisory form:
+Do not put credentials, account state, or conversation contents in a public issue. Use [private vulnerability reporting](https://github.com/miguelpieras/claude-transplant/security/advisories/new) for security problems.
 
-https://github.com/vitaliyhayda/claude-transplant/security/advisories/new
+The menubar verifies account and plan metadata using the current Claude Desktop cookie database and its Safe Storage key from macOS Keychain. Decrypted cookies stay in memory and are sent only to `https://claude.ai`. Account IDs, plan labels, and timestamps are cached locally. Plain `accounts` listing does not fetch credentials; local workflow planning can refresh account metadata.
 
-Expect a reply within a week.
+Local moves keep transcript and sidecar files unchanged. The recovery journal contains record hashes and task metadata, not a transcript backup. Resume sends a continuation message through the native Claude Desktop interface and can start work under the selected Claude plan. Accessibility access is required only for that resume operation.
 
-Local moves make no network calls. Remote Control reconciliation, enabled by `--cloud` and by the menubar, reads Claude Desktop's cookie database and its Safe Storage key from macOS Keychain. Cookies are decrypted only in memory, sent only to `https://claude.ai`, and never printed or persisted by claude-transplant. This path reads private session metadata and history, then archives or restores a source Remote Control row only after local verification. It fails closed on authentication, organization, status, history, or response-shape changes.
+The inherited advanced `--cloud` CLI is separate. It can read remote history and archive or restore source Remote Control entries. Do not mix it with a collection managed by the menubar.
 
-A rescued remote branch can contain the original messages, tool results, images, and documents. It is written only into the same local Claude transcript pool and Desktop record store already used by Claude Code. Server-owned artifacts, comments, versions, and share links are neither copied nor recreated.
+The app uses undocumented Claude file formats and controls. If account identity or a selected conversation cannot be verified, the operation must stop. The macOS app is compiled locally; rebuilding can require the user to grant Accessibility access again.
