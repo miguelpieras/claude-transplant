@@ -6789,6 +6789,43 @@ extension Model {
 struct StateChecks {
     @MainActor
     static func main() {
+        // Suggested conversations append the parent title to their accessible row label.
+        // Resolve the child and parent from their exact menu titles, never from that suffix.
+        final class SidebarNode {
+            let name: String
+            let button: Bool
+            let children: [SidebarNode]
+            weak var parent: SidebarNode?
+            init(_ name: String = "", button: Bool = false, children: [SidebarNode] = []) {
+                self.name = name; self.button = button; self.children = children
+                for child in children { child.parent = self }
+            }
+        }
+        func row(_ title: String, _ button: SidebarNode, wrapped: Bool = true) -> SidebarNode {
+            let menu = SidebarNode("More options for " + title)
+            return SidebarNode(children: [button, wrapped ? SidebarNode(children: [menu]) : menu])
+        }
+        func descendants(_ roots: [SidebarNode]) -> [SidebarNode] {
+            roots.flatMap { [$0] + descendants($0.children) }
+        }
+        let child = SidebarNode("Something went wrong Child task Started from a suggestion in Parent task", button: true)
+        let parent = SidebarNode("Running Parent task", button: true)
+        let sidebar = [
+            row("Child task", child),
+            row("Parent task", parent, wrapped: false),
+            row("Other task", SidebarNode("Other task Started from a suggestion in Parent task", button: true))
+        ]
+        func matches(_ title: String, rows: [SidebarNode] = sidebar) -> [SidebarNode] {
+            ClaudeResume.conversationRows(descendants(rows), title: title, label: { $0.name },
+                parent: { $0.parent }, buttons: { descendants([$0]).filter { $0.button } })
+        }
+        precondition(matches("Child task").count == 1 && matches("Child task")[0] === child)
+        precondition(matches("Parent task").count == 1 && matches("Parent task")[0] === parent)
+        precondition(matches("task").isEmpty && matches("").isEmpty && matches("Missing task").isEmpty)
+        let duplicate = sidebar + [row("Child task", SidebarNode("Child task", button: true))]
+        precondition(matches("Child task", rows: duplicate).count == 2)
+        let menuOnly = SidebarNode(children: [SidebarNode("More options for Child task", button: true)])
+        precondition(matches("Child task", rows: [menuOnly]).isEmpty)
         let menuSize = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: nil)!.size
         var textHeight: Int?
         for badge in ["", "0%", "9%", "10%", "47%", "99%", "100%"] {

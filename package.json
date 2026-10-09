@@ -1,6 +1,6 @@
 {
   "name": "@miguelpieras/claude-transplant",
-  "version": "4.1.3-resume.1",
+  "version": "4.1.3-resume.2",
   "description": "Move local Claude Desktop Code sessions to a verified Personal plan and resume interrupted work. Unofficial macOS beta.",
   "type": "module",
   "bin": {

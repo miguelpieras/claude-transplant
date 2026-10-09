@@ -203,10 +203,30 @@ enum ClaudeResume {
             return URL(string: address)?.lastPathComponent == item.recordId
         }
     }
+    static func conversationRows<Node>(_ nodes: [Node], title: String, label: (Node) -> String, parent: (Node) -> Node?, buttons: (Node) -> [Node]) -> [Node] {
+        guard !title.isEmpty else { return [] }
+        let menuLabel = "More options for " + title
+        // Row labels include status and suggestion provenance. The menu retains the exact title.
+        return nodes.filter { label($0) == menuLabel }.flatMap { menu -> [Node] in
+            var ancestor = parent(menu)
+            // Electron can wrap the menu separately from the conversation button.
+            for _ in 0..<8 {
+                guard let row = ancestor else { break }
+                let candidates = buttons(row).filter { label($0) != menuLabel }
+                if !candidates.isEmpty { return candidates }
+                ancestor = parent(row)
+            }
+            return []
+        }
+    }
     static func conversationMatches(_ tree: [AXUIElement], item: ResumeItem) -> [AXUIElement] {
         guard let sidebar = tree.first(where: { label($0) == "Sidebar" }) else { return [] }
         // Chat messages can contain buttons with another conversation's title.
-        return elements(sidebar).filter { text($0,kAXRoleAttribute) == kAXButtonRole && (label($0) == item.title || label($0).hasSuffix(" " + item.title)) }
+        return conversationRows(elements(sidebar), title: item.title, label: label, parent: { element in
+            guard let value = attribute(element,kAXParentAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            let parent = value as! AXUIElement
+            return CFEqual(parent,sidebar) ? nil : parent
+        }, buttons: { elements($0).filter { text($0,kAXRoleAttribute) == kAXButtonRole } })
     }
     static func press(_ element: AXUIElement) -> Bool { AXUIElementPerformAction(element,kAXPressAction as CFString) == .success }
     static func resume(_ item: ResumeItem) -> (ok: Bool, message: String) {
@@ -231,7 +251,6 @@ enum ClaudeResume {
         let matches = conversationMatches(tree,item:item)
         // Several sidebar groups can hold the same title. Never choose one by order.
         guard matches.count == 1, let row = matches.first else { return (false,"Open this conversation manually; its title is missing or not unique") }
-        if label(row).hasPrefix("Running ") { return (true,"already running") }
         guard press(row) else { return (false,"Could not open the conversation") }
         for _ in 0..<40 {
             Thread.sleep(forTimeInterval:0.25)

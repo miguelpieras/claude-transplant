@@ -9,7 +9,7 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 Requires macOS 13 or later, Node.js 22 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`).
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.1
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.2
 claude-transplant-resume menubar
 ```
 
@@ -35,7 +35,7 @@ The app considers unfinished conversations active in the last 24 hours. It exclu
 
 > Continue the existing task from where it stopped. Check the result of any interrupted command or pending check before running it again. Keep the existing scope and instructions.
 
-Running conversations and unsent drafts are left alone. The app checks the selected account and conversation. A missing or duplicate sidebar title requires manual action. English Claude Desktop controls are required for this beta.
+Running conversations and unsent drafts are left alone. The app checks the selected account and conversation ID before sending. It finds sidebar rows by their exact menu titles, including conversations started from a suggestion. A missing or duplicate menu title requires manual action. English Claude Desktop controls are required for this beta.
 
 The result confirms new assistant activity or a visible running state. It does **not** prove that the conversation's task has finished. A resumed conversation can still reach a usage limit, request approval, or need other input. Continuation requests use the selected Claude plan's allowance.
 
