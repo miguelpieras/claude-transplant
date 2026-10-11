@@ -254,7 +254,8 @@ final class Model: ObservableObject {
     @Published var flowActionError = ""
     @Published var flowBusy = false
     var flowAlreadyRunning: Set<String> = []
-    var flowRefreshing = false
+    @Published var flowRefreshing = false
+    var flowChecking: Bool { refreshing || flowRefreshing }
     @Published var from: Set<String> = []
     @Published var to: String?
     @Published var excluded: Set<String> = []
@@ -276,7 +277,7 @@ final class Model: ObservableObject {
     let snapshot: Bool
     let demo: Bool
     private let config: Config?
-    private var refreshing = false
+    @Published private var refreshing = false
     private var pendingResult = false
     private var pendingPlan: Event?
     private var operationArgs: [String] = []
@@ -447,11 +448,16 @@ final class Model: ObservableObject {
     func refresh() {
         guard !refreshing, !running, !sweeping else { return }
         refreshing = true
+        flowError = ""
         var text = ""
         run(["accounts", "--json"], line: { text += $0 }) { [weak self] status, _ in
             guard let self else { return }
             refreshing = false
-            guard status == 0, let data = text.data(using: .utf8), let list = try? JSONDecoder().decode([Account].self, from: data) else { return }
+            guard status == 0, let data = text.data(using: .utf8), let list = try? JSONDecoder().decode([Account].self, from: data) else {
+                flowPlan = nil
+                flowError = "Could not read your Claude account. Keep Claude open and try again shortly."
+                return
+            }
             accounts = list
             settle()
             let identity = list.filter { $0.active == true }.map(\.id).joined(separator: ",")

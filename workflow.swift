@@ -47,6 +47,7 @@ extension Model {
     func refreshWorkflow() {
         guard !flowRefreshing, !flowBusy, !flowChoosingSource else { return }
         flowRefreshing = true
+        flowError = ""
         var output = ""
         run(["local-plan", "--json"], line: { output += $0 }) { [weak self] status, error in
             guard let self else { return }
@@ -61,7 +62,7 @@ extension Model {
                 flowError = ""
             } else {
                 flowPlan = nil
-                flowError = error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
+                flowError = error.isEmpty ? "Could not verify your Claude account. Keep Claude open and try again shortly." : error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
             }
         }
     }
@@ -83,7 +84,7 @@ extension Model {
     }
 
     func startWorkflow() {
-        guard let plan = flowPlan, !flowBusy else { return }
+        guard let plan = flowPlan, !flowBusy, !flowChecking else { return }
         flowActionError = ""
         if flowResume && !plan.resume.isEmpty && !AXIsProcessTrusted() {
             let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -275,6 +276,7 @@ struct WorkflowPanel: View {
     @EnvironmentObject var model: Model
     var body: some View {
         VStack(alignment:.leading,spacing:10) {
+            if model.flowChecking { ProgressView("Checking account…").controlSize(.small) }
             if model.flowNeedsSource {
                 Text("Choose the account that holds your conversations.").font(.callout)
                 Picker("Source", selection: $model.flowSource) {
@@ -301,11 +303,11 @@ struct WorkflowPanel: View {
                 Toggle("Resume stopped conversations", isOn: $model.flowResume).font(.caption).disabled(model.flowBusy)
                 if model.flowResume && !plan.resume.isEmpty { Text("Sends a Continue message to unfinished conversations active in the last 24 hours.").font(.caption).foregroundStyle(.secondary) }
                 Button(plan.recovery == true ? "Recover move" : plan.moving ? (model.flowResume ? "Move and resume" : "Move") : "Resume stopped") { model.startWorkflow() }
-                    .buttonStyle(.borderedProminent).disabled(model.flowBusy || (!plan.moving && (plan.resume.isEmpty || !model.flowResume)))
-            } else if model.flowError.isEmpty {
-                ProgressView("Reading Claude accounts")
+                    .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking || (!plan.moving && (plan.resume.isEmpty || !model.flowResume)))
+            } else if model.flowError.isEmpty && !model.flowChecking {
+                ProgressView("Checking account…").controlSize(.small)
             }
-            if !model.flowError.isEmpty { Text(model.flowError).font(.caption).foregroundStyle(.orange) }
+            if !model.flowChecking && !model.flowError.isEmpty { Text(model.flowError).font(.caption).foregroundStyle(.orange) }
             if !model.flowActionError.isEmpty {
                 Text(model.flowActionError).font(.caption).foregroundStyle(.orange)
                 if model.flowActionError.contains("Accessibility") {

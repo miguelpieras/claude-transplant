@@ -914,6 +914,11 @@ export async function cloudClient(paths, expected = null, io = {}) {
   return {
     account: account.uuid,
     org,
+    identity: {
+      account: account.uuid,
+      email: account.email_address ?? null,
+      organizations: organizations.map(item => ({ org: item.uuid, name: item.name ?? null, capabilities: item.capabilities ?? [] }))
+    },
     list: async () => {
       const query = new URLSearchParams({ statuses: 'active', limit: '100' })
       query.append('statuses', 'paused')

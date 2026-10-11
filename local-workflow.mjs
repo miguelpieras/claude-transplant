@@ -105,7 +105,8 @@ export async function planLocal(paths,{allAccounts=null,includeResume=true}={}) 
   if(!group)return {setup:true}
   const to=all.find(row=>row.active)
   if (!to) throw new Error('Open Claude Desktop and sign into the destination plan')
-  if (!to.identityKnown || !to.personal) throw new Error('Select your Personal Max or Pro plan in Claude; its identity must be verified')
+  if (!to.identityKnown) throw new Error('Could not verify your Claude account. Keep Claude open and try again shortly.')
+  if (!to.personal) throw new Error('This plan is not Personal Max or Pro. Select a Personal Max or Pro plan in Claude.')
   if(allAccounts===null && !same(to,await signedIn(paths)))throw new Error('Claude is still changing accounts. Try again in a moment.')
   const pending=await read(path.join(paths.state,'local-workflow-pending.json'),null)
   if(pending){

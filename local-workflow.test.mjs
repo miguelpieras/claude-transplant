@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os'
 import path from 'node:path'
 import {spawnSync} from 'node:child_process'
 import {createHash} from 'node:crypto'
-import {accountIdentity, accounts} from './transplant.js'
+import {accountIdentity, accounts, cloudClient} from './transplant.js'
 import {collection, selectSource, planLocal, moveRecords, recoverLocal, resumeReason, runLocal} from './local-workflow.mjs'
 
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
@@ -49,13 +49,36 @@ test('identity uses chat memberships and distinguishes Max from Team',()=>{
   assert.throws(()=>accountIdentity({account:uuid(1),email:'unknown',organizations:[]}),/verified/)
 })
 
+test('account verification receives the identity fetched from Claude',async t=>{
+  const selected={account:uuid(1),org:uuid(2),state:'known'}
+  const requested=[]
+  t.mock.method(globalThis,'fetch',async url=>{
+    const endpoint=new URL(url).pathname
+    requested.push(endpoint)
+    if(endpoint==='/api/account')return Response.json({uuid:selected.account,email_address:'personal@example.com'})
+    assert.equal(endpoint,'/api/organizations')
+    return Response.json([{uuid:selected.org,capabilities:['chat','claude_max']},{uuid:uuid(3),name:'Company',capabilities:['chat','raven']}])
+  })
+  const client=await cloudClient({},selected,{active:selected,cookies:new Map([['sessionKey','fixture']]),userAgent:'fixture'})
+  const verified=accountIdentity(client.identity)
+  assert.equal(verified.email,'personal@example.com')
+  assert.deepEqual(verified.organizations,[{org:selected.org,label:'Personal Max',personal:true},{org:uuid(3),label:'Company',personal:false}])
+  assert.deepEqual(requested,['/api/account','/api/organizations'])
+})
+
 test('planning follows the active Personal plan and refuses a Team plan',async t=>{
   const f=await fixture(t)
   assert.equal(f.plan.count,3);assert.equal(f.plan.moving,true)
   const same=await planLocal(f.paths,{allAccounts:[{...f.from,active:true},{...f.to,active:false}]})
   assert.equal(same.moving,false)
   await assert.rejects(planLocal(f.paths,{allAccounts:[f.from,{...f.to,personal:false}]}),/Personal Max or Pro/)
-  await assert.rejects(planLocal(f.paths,{allAccounts:[f.from,{...f.to,identityKnown:false}]}),/verified/)
+  for(const personal of [true,false]) {
+    await assert.rejects(planLocal(f.paths,{allAccounts:[f.from,{...f.to,identityKnown:false,personal}]}),error=>{
+      assert.match(error.message,/Could not verify your Claude account/)
+      assert.doesNotMatch(error.message,/Select.*plan|not Personal/)
+      return true
+    })
+  }
 })
 
 test('fresh setup requires an explicit source and does not need an old receipt',async t=>{

@@ -9,7 +9,7 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 Requires macOS 13 or later, Node.js 22 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`).
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.2
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.3
 claude-transplant-resume menubar
 ```
 
@@ -24,6 +24,8 @@ The fork has its own command, app identity, and settings directory. Quit the ori
 3. Check the source, destination, and record count shown in the panel. New signed-in accounts can appear before they have any conversations. If an account shows only an ID, sign into it in Claude Desktop once so the app can read its name.
 4. Click **Move and resume**. Claude closes briefly, the local records move, and Claude opens again. Clear **Resume stopped conversations** for a move without continuation messages.
 5. Read the result and open **Details** for any conversation that needs attention.
+
+The app shows **Checking account…** while it reads and verifies your Claude login. Move and resume are unavailable during this check. A failed account check is reported separately from a verified plan that is not Personal Max or Pro.
 
 The collection follows its last destination. New conversations created there join the next move. Conversations that were already in a destination before the move stay there if you later move the collection away. **Accounts → Choose a different source** explicitly starts a new collection from all records in that account and plan.
 

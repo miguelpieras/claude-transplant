@@ -6789,6 +6789,37 @@ extension Model {
 struct StateChecks {
     @MainActor
     static func main() {
+        let checking = Model(config: Config(node: "fixture", script: "fixture"))
+        precondition(checking.flowChecking && requests.count == 1)
+        requests.removeFirst().2(1, "fixture account read failed")
+        precondition(!checking.flowChecking && checking.flowPlan == nil)
+        precondition(checking.flowError.contains("Could not read your Claude account"))
+        let planJSON = #"{"from":{"account":"source","org":"personal"},"to":{"account":"target","org":"personal"},"count":1,"moving":true,"token":"fixture","resume":[]}"#
+        checking.flowPlan = try! JSONDecoder().decode(LocalPlan.self, from: Data(planJSON.utf8))
+        checking.refresh()
+        precondition(checking.flowChecking && checking.flowError.isEmpty)
+        checking.startWorkflow()
+        precondition(requests.count == 1 && requests[0].0 == ["accounts", "--json"])
+        let accountRead = requests.removeFirst()
+        accountRead.1("[]"); accountRead.2(0, "")
+        precondition(checking.flowChecking && requests.count == 1 && requests[0].0 == ["local-plan", "--json"])
+        checking.startWorkflow()
+        precondition(requests.count == 1)
+        requests.removeFirst().2(1, "claude-transplant-resume: Could not verify your Claude account.")
+        precondition(!checking.flowChecking && checking.flowPlan == nil)
+        precondition(checking.flowError == "Could not verify your Claude account.")
+        checking.refreshWorkflow()
+        precondition(checking.flowChecking && checking.flowError.isEmpty)
+        let verified = requests.removeFirst()
+        verified.1(planJSON); verified.2(0, "")
+        precondition(!checking.flowChecking && checking.flowError.isEmpty && checking.flowPlan?.to.account == "target")
+        checking.refreshWorkflow()
+        requests.removeFirst().2(0, "")
+        precondition(!checking.flowChecking && checking.flowPlan == nil && !checking.flowError.isEmpty)
+        checking.refreshWorkflow()
+        let setup = requests.removeFirst()
+        setup.1(#"{"setup":true}"#); setup.2(0, "")
+        precondition(!checking.flowChecking && checking.flowNeedsSource && checking.flowError.isEmpty)
         // Suggested conversations append the parent title to their accessible row label.
         // Resolve the child and parent from their exact menu titles, never from that suffix.
         final class SidebarNode {
