@@ -258,5 +258,46 @@ test('resume selection excludes finished work and user decisions',()=>{
   assert.equal(resumeReason({...record,isArchived:true},request),null)
   assert.equal(resumeReason({...record,scheduledTaskId:'routine'},request),null)
   assert.equal(resumeReason({...record,lastActivityAt:1},request),null)
-  assert.equal(resumeReason({...record,error:'Rate limit reached'},request),'Interrupted')
+  assert.equal(resumeReason({...record,error:'Rate limit reached'},request),'Usage limit reached')
+})
+
+test('limit retry selects recent usage errors and preserves the current account',async t=>{
+  const f=await fixture(t)
+  const active=[{...f.from,active:true},{...f.to,active:false}]
+  for(const [n,error,extra] of [
+    [30,"You've hit your session limit · resets 5pm",{}],
+    [31,"You've hit your weekly limit · resets Monday",{}],
+    [32,'Rate limit reached',{}],
+    [33,'API Error: 429 rate_limit_error',{}],
+    [34,'Connection timeout',{}],
+    [35,'Context window limit reached',{}],
+    [36,'Cost budget limit reached',{}],
+    [37,'Usage limit reached',{isArchived:true}],
+    [38,'Usage limit reached',{scheduledTaskId:'routine'}],
+    [39,'Usage limit reached',{postTurnSummary:{needs_action:'Approve the next step'}}],
+    [40,'Usage limit reached',{lastActivityAt:Date.now()-25*3600_000}],
+    [41,'',{}]
+  ]) await put(path.join(f.src,name(n)),{sessionId:name(n).slice(0,-5),cliSessionId:uuid(n+100),title:`Conversation ${n}`,lastActivityAt:Date.now(),error,...extra})
+  const before=await collection(f.paths)
+  const regular=await planLocal(f.paths,{allAccounts:active})
+  const limited=await planLocal(f.paths,{allAccounts:active,limitsOnly:true})
+  assert.equal(regular.limitResumeCount,4)
+  assert(regular.resume.length>limited.resume.length)
+  assert.deepEqual(limited.resume.map(row=>row.recordId),[30,31,32,33].map(n=>name(n).slice(0,-5)))
+  assert.equal(limited.token,regular.token)
+  assert.equal(limited.moving,false)
+  assert.deepEqual(limited.to,limited.from)
+  await assert.rejects(planLocal(f.paths,{allAccounts:[f.from,f.to],limitsOnly:true}),/No records were moved/)
+  await put(path.join(f.paths.state,'local-workflow-pending.json'),{...regular,records:[]})
+  await assert.rejects(planLocal(f.paths,{allAccounts:active,limitsOnly:true}),/No records were moved/)
+  assert.deepEqual(await collection(f.paths),before)
+  for(let n=10;n<13;n++)assert.equal(await readFile(path.join(f.src,name(n)),'utf8'),f.original[n-10])
+})
+
+test('limit retry rejects unrelated commands and move-only mode',()=>{
+  for(const args of [['accounts','--limits-only'],['local-move','--limits-only','--no-resume']]) {
+    const result=spawnSync(process.execPath,['transplant.js',...args],{cwd:import.meta.dirname,encoding:'utf8'})
+    assert.notEqual(result.status,0)
+    assert.match(result.stderr,/--limits-only requires local-plan or local-move without --no-resume/)
+  }
 })

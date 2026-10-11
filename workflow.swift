@@ -20,6 +20,7 @@ struct LocalPlan: Decodable {
     let recovery: Bool?
     let token: String
     let resume: [ResumeItem]
+    let limitResumeCount: Int?
 }
 struct LocalSetup: Decodable {
     let setup: Bool
@@ -83,10 +84,11 @@ extension Model {
         }
     }
 
-    func startWorkflow() {
+    func startWorkflow(limitsOnly: Bool = false) {
         guard let plan = flowPlan, !flowBusy, !flowChecking else { return }
+        if limitsOnly && (plan.moving || plan.recovery == true || (plan.limitResumeCount ?? 0) == 0) { return }
         flowActionError = ""
-        if flowResume && !plan.resume.isEmpty && !AXIsProcessTrusted() {
+        if (limitsOnly || flowResume) && !plan.resume.isEmpty && !AXIsProcessTrusted() {
             let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(prompt)
             flowActionError = "Enable Claude Transplant Resume in System Settings → Privacy & Security → Accessibility, then click again."
@@ -97,10 +99,11 @@ extension Model {
         running = true
         lines = []
         badge = ""
-        note = plan.moving ? "Checking the destination" : "Checking stopped conversations"
+        note = limitsOnly ? "Checking usage-limit errors" : plan.moving ? "Checking the destination" : "Checking stopped conversations"
         var result: LocalResult?
         var args = ["local-move", "--restart-approved", plan.token, "--json"]
-        if !flowResume { args.append("--no-resume") }
+        if limitsOnly { args.append("--limits-only") }
+        else if !flowResume { args.append("--no-resume") }
         run(args, line: { [weak self] line in
             guard let data = line.data(using: .utf8), let event = try? JSONDecoder().decode(LocalResult.self, from: data) else { return }
             if let text = event.text { self?.note = text }
@@ -109,13 +112,14 @@ extension Model {
             guard let self else { return }
             guard status == 0, let result, result.ok == true, let target = result.target else {
                 flowBusy = false; running = false
-                flowActionError = error.isEmpty ? "The move did not finish. Refresh before retrying." : error
+                flowActionError = error.isEmpty ? "The operation did not finish. Refresh before retrying." : error
                 refreshWorkflow()
                 return
             }
             let items = result.resume ?? []
             if items.isEmpty {
                 note = result.moved ?? 0 > 0 ? "Moved \(result.moved ?? 0) records. \(flowResume ? "No recent interrupted conversations need a restart." : "Automatic resume is off.")" : "Your conversations are on this plan. No recent interrupted conversations need a restart."
+                if limitsOnly { note = "No recent conversations with a usage-limit error need a restart." }
                 flowBusy = false; running = false; refreshWorkflow()
                 return
             }
@@ -304,6 +308,11 @@ struct WorkflowPanel: View {
                 if model.flowResume && !plan.resume.isEmpty { Text("Sends a Continue message to unfinished conversations active in the last 24 hours.").font(.caption).foregroundStyle(.secondary) }
                 Button(plan.recovery == true ? "Recover move" : plan.moving ? (model.flowResume ? "Move and resume" : "Move") : "Resume stopped") { model.startWorkflow() }
                     .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking || (!plan.moving && (plan.resume.isEmpty || !model.flowResume)))
+                if !plan.moving && plan.recovery != true {
+                    Button("Resume limit-stopped (\(plan.limitResumeCount ?? 0))") { model.startWorkflow(limitsOnly: true) }
+                        .disabled(model.flowBusy || model.flowChecking || (plan.limitResumeCount ?? 0) == 0)
+                    Text("Retries usage-limit errors from the last 24 hours on this account.").font(.caption).foregroundStyle(.secondary)
+                }
             } else if model.flowError.isEmpty && !model.flowChecking {
                 ProgressView("Checking account…").controlSize(.small)
             }

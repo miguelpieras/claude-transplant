@@ -73,6 +73,7 @@ export async function tailRows(info) {
 export function resumeReason(record, rows, now=Date.now()) {
   if (record.isArchived || record.scheduledTaskId || !record.cliSessionId || now-(record.lastActivityAt??0)>24*3600_000) return null
   if (record.postTurnSummary?.needs_action?.trim()) return null
+  if (/\b(?:session|weekly|usage|rate)[ _-]limit\b|\brate_limit_error\b/i.test(record.error??'')) return 'Usage limit reached'
   if (record.error && /limit|overload|interrupt|connection|timeout|authentication/i.test(record.error)) return 'Interrupted'
   if (/in progress|pending|waiting|will .*after/i.test(record.postTurnSummary?.status_detail??'')) return 'Pending check'
   const conversation=rows.filter(row=>['user','assistant'].includes(row.type))
@@ -99,7 +100,7 @@ export async function resumeCandidates(paths,dir,selected) {
   return result.sort((a,b)=>a.title.localeCompare(b.title) || a.recordId.localeCompare(b.recordId))
 }
 
-export async function planLocal(paths,{allAccounts=null,includeResume=true}={}) {
+export async function planLocal(paths,{allAccounts=null,includeResume=true,limitsOnly=false}={}) {
   const group=await collection(paths)
   const all=allAccounts??await accounts(paths,null,{verifyIdentity:true})
   if(!group)return {setup:true}
@@ -109,6 +110,7 @@ export async function planLocal(paths,{allAccounts=null,includeResume=true}={}) 
   if (!to.personal) throw new Error('This plan is not Personal Max or Pro. Select a Personal Max or Pro plan in Claude.')
   if(allAccounts===null && !same(to,await signedIn(paths)))throw new Error('Claude is still changing accounts. Try again in a moment.')
   const pending=await read(path.join(paths.state,'local-workflow-pending.json'),null)
+  if(limitsOnly && (pending || !same(group.current,to))) throw new Error('Resume limit-stopped requires the collection to be on the current plan. No records were moved.')
   if(pending){
     if(!same(pending.to,to))throw new Error(`Sign into ${pending.to.label} to recover the interrupted move`)
     return {from:pending.from,to:pending.to,count:pending.records.length,moving:true,recovery:true,token:pending.token,records:pending.records.map(row=>row.name),resume:includeResume?pending.resume??[]:[]}
@@ -120,8 +122,10 @@ export async function planLocal(paths,{allAccounts=null,includeResume=true}={}) 
   const selected=(await names(dir)).filter(name=>!keep.has(name))
   if (!selected.length) throw new Error('No conversations remain in the recorded source account')
   const token=digest(JSON.stringify({from:ref(from),to:ref(to),selected}))
+  const candidates=includeResume?await resumeCandidates(paths,dir,selected):[]
+  const limited=candidates.filter(item=>item.reason==='Usage limit reached')
   return {from:ref(from),to:ref(to),count:selected.length,moving:!same(from,to),token,records:selected,
-    resume:includeResume?await resumeCandidates(paths,dir,selected):[]}
+    resume:limitsOnly?limited:candidates,limitResumeCount:limited.length}
 }
 
 export async function assertDesktopStopped(paths,records) {
@@ -275,9 +279,9 @@ async function quitDesktop(paths) {
   throw new Error('Claude did not stop within 25 seconds; no force quit was used')
 }
 
-export async function runLocal(paths,command,token,emit,{source=null,includeResume=true}={}) {
+export async function runLocal(paths,command,token,emit,{source=null,includeResume=true,limitsOnly=false}={}) {
   if(command==='local-identity')return emit(await signedIn(paths))
-  if(command==='local-plan') return emit(await planLocal(paths,{includeResume}))
+  if(command==='local-plan') return emit(await planLocal(paths,{includeResume,limitsOnly}))
   if(command==='local-source')return locked(paths,async()=>emit(await selectSource(paths,source)))
   if(command==='local-status') {
     const group=await collection(paths),index=await transcriptIndex(paths.pool),rows=[]
@@ -291,7 +295,7 @@ export async function runLocal(paths,command,token,emit,{source=null,includeResu
     return emit({rows})
   }
   return locked(paths,async()=>{
-    const plan=await planLocal(paths,{includeResume})
+    const plan=await planLocal(paths,{includeResume,limitsOnly})
     if(plan.setup)throw new Error('Select the source account first')
     if(plan.token!==token)throw new Error('The account or session list changed. Refresh and try again.')
     if(plan.moving){

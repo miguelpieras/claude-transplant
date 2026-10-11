@@ -52,6 +52,7 @@ const HELP = `claude-transplant-resume   move Claude Code history between accoun
   --restart-approved <token>    execute the exact restart plan previously displayed
   --json                        machine-readable output
   --no-resume                   move records only in the local workflow
+  --limits-only                 resume recent usage-limit errors on the current plan
   --version
 `
 
@@ -4183,7 +4184,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
 }
 
 function parse(argv) {
-  const args = { from: [], to: null, cmd: null, dry: false, cloud: false, json: false, help: false, version: false, remove: false, snapshot: null, restartApproved: null, moveOnly: false, source: null, noResume: false }
+  const args = { from: [], to: null, cmd: null, dry: false, cloud: false, json: false, help: false, version: false, remove: false, snapshot: null, restartApproved: null, moveOnly: false, source: null, noResume: false, limitsOnly: false }
   const value = (i) => { if (argv[i] === undefined || argv[i].startsWith('-')) throw new Error(`${argv[i - 1]} needs a value`); return argv[i] }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -4194,6 +4195,7 @@ function parse(argv) {
     else if (a === '--move-only') args.moveOnly = true
     else if (a === '--source') args.source = value(++i)
     else if (a === '--no-resume') args.noResume = true
+    else if (a === '--limits-only') args.limitsOnly = true
     else if (a === '--restart-approved') args.restartApproved = value(++i)
     else if (a === '--json') args.json = true
     else if (a === '--remove') args.remove = true
@@ -4217,6 +4219,7 @@ function parse(argv) {
   if (args.source !== null && args.cmd !== 'local-source') throw new Error('--source requires local-source')
   if (args.cmd === 'local-source' && !args.source) throw new Error('local-source requires --source <account/org>')
   if (args.noResume && !['local-plan','local-move'].includes(args.cmd)) throw new Error('--no-resume requires local-plan or local-move')
+  if (args.limitsOnly && (!['local-plan','local-move'].includes(args.cmd) || args.noResume)) throw new Error('--limits-only requires local-plan or local-move without --no-resume')
   return args
 }
 
@@ -4233,7 +4236,7 @@ async function main(argv) {
   if (['local-source','local-plan','local-move','local-status','local-identity'].includes(args.cmd)) {
     if (args.from.length || args.to || args.dry || args.cloud || args.moveOnly) throw new Error('Local workflow uses the verified signed-in Personal plan')
     const {runLocal} = await import('./local-workflow.mjs')
-    return runLocal(paths,args.cmd,args.restartApproved,emit,{source:args.source,includeResume:!args.noResume})
+    return runLocal(paths,args.cmd,args.restartApproved,emit,{source:args.source,includeResume:!args.noResume,limitsOnly:args.limitsOnly})
   }
   if (!args.dry && !['accounts','menubar','restart'].includes(args.cmd) && await exists(path.join(paths.state,'local-workflow.json'))) throw new Error('This collection uses the local workflow. Use the menubar to move it back; inherited undo and move commands use separate receipts.')
   const showPlan = (plan) => {
