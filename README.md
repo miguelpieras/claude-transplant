@@ -9,7 +9,7 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 Requires macOS 13 or later, Node.js 22 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`).
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.4
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.5
 claude-transplant-resume menubar
 ```
 
@@ -39,7 +39,7 @@ The app considers unfinished conversations active in the last 24 hours. It exclu
 
 After your allowance resets, use **Resume limit-stopped** on the current plan. The count shows recent conversations with a session, weekly, usage, or rate-limit error. This button sends the same Continue message without moving records or changing accounts. It uses the same 24-hour window and exclusions; other errors and finished work are not selected. It does not check when your allowance resets, so Claude can report the limit again if it is still active.
 
-Running conversations and unsent drafts are left alone. The app checks the selected account and conversation ID before sending. It finds sidebar rows by their exact menu titles, including conversations started from a suggestion. A missing or duplicate menu title requires manual action. English Claude Desktop controls are required for this beta.
+Running conversations and unsent drafts are left alone. The app opens each conversation by its session ID, so conversations with the same title are resumed separately. It checks the selected account and conversation ID before sending. English Claude Desktop controls are required for this beta.
 
 The result confirms new assistant activity or a visible running state. It does **not** prove that the conversation's task has finished. A resumed conversation can still reach a usage limit, request approval, or need other input. Continuation requests use the selected Claude plan's allowance.
 
