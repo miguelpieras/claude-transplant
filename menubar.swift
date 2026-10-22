@@ -293,6 +293,7 @@ final class Model: ObservableObject {
     private var poller: AnyCancellable?
     private var progressTimer: AnyCancellable?
     private var activeIdentity = ""
+    private var identityPolling = false
     private var targetChosen = false
     private var selectionComplete = false
     private var panelOpen = false
@@ -312,7 +313,7 @@ final class Model: ObservableObject {
         refresh()
         poller = Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self, !self.running, !self.sweeping else { return }
-            self.refresh()
+            self.pollAccount()
         }
         progressTimer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self, self.running, !self.flowBusy else { return }
@@ -436,8 +437,27 @@ final class Model: ObservableObject {
     }
 
     func panelVisibility(_ visible: Bool) {
+        let becameVisible = visible && !panelOpen
         panelOpen = visible
-        if visible { refresh() }
+        if becameVisible { refresh() }
+    }
+
+    func pollAccount() {
+        guard !identityPolling, !flowChecking, !running, !sweeping else { return }
+        guard flowPlan != nil || flowNeedsSource else { refresh(); return }
+        identityPolling = true
+        var output = ""
+        run(["local-identity", "--json"], line: { output += $0 }) { [weak self] status, _ in
+            guard let self else { return }
+            identityPolling = false
+            guard !running, !sweeping, !flowChecking else { return }
+            let current = status == 0 ? output.data(using: .utf8).flatMap { try? JSONDecoder().decode(LocalAccount.self, from: $0) } : nil
+            let identity = current.map { "\($0.account)/\($0.org)" } ?? ""
+            guard identity != activeIdentity else { return }
+            flowPlan = nil
+            projectPlan = nil
+            refresh()
+        }
     }
 
     private func clearResult() {
