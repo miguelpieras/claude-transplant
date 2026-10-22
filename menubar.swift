@@ -255,7 +255,13 @@ final class Model: ObservableObject {
     @Published var flowBusy = false
     var flowAlreadyRunning: Set<String> = []
     @Published var flowRefreshing = false
-    var flowChecking: Bool { refreshing || flowRefreshing }
+    @Published var projectPlan: ProjectPlan?
+    @Published var projectChoice = ""
+    @Published var projectError = ""
+    @Published var projectRefreshing = false
+    var projectRefreshedAt: Date?
+    var projectRefreshIdentity = ""
+    var flowChecking: Bool { refreshing || flowRefreshing || projectRefreshing }
     @Published var from: Set<String> = []
     @Published var to: String?
     @Published var excluded: Set<String> = []
@@ -1285,6 +1291,9 @@ struct TransplantApp: App {
 
     init() {
         let args = CommandLine.arguments
+        if args.contains("--project-artifact-export") {
+            exit(ProjectArtifactExporter.run(arguments: args))
+        }
         if let index = args.firstIndex(of: "--demo"), index + 1 < args.count {
             let model = Model(demo: Demo.accounts)
             _model = StateObject(wrappedValue: model)

@@ -269,11 +269,12 @@ function makeRestorePlan(manifest,outputs,getRaw) {
   }
   const prefix = `migration/${manifest.source.projectId}`
   for (const entry of manifest.files) {
-    if (entry.role==='memory') memoryUploads.push(upload(entry.originalPath,`originals/${entry.path}`))
+    if (entry.role==='memory' && entry.originalPath.replace(/^\//,'')!=='MEMORY.md') memoryUploads.push(upload(entry.originalPath,`originals/${entry.path}`))
     if (entry.role==='library') libraryUploads.push(upload(entry.originalPath??`captured-files/${entry.id}/${entry.name}`,`originals/${entry.path}`,{kind:'original-library',sourceFileId:entry.id,...(own(entry,'captureFormat')?{captureFormat:entry.captureFormat}:{}),...(own(entry,'nativeStateCaptured')?{nativeStateCaptured:entry.nativeStateCaptured}:{})}))
     if (entry.role==='local-transcript') libraryUploads.push(upload(`${prefix}/originals/${entry.path}`,`originals/${entry.path}`,{kind:'original-local-transcript',threadId:entry.threadId,sessionId:entry.sessionId}))
   }
   libraryUploads.push(upload(`${prefix}/main-transcript.md`,'main-transcript.md',{kind:'main-transcript'}))
+  memoryUploads.push(upload('/MEMORY.md','MEMORY.md',{kind:'continuation-index'}))
   for (const thread of manifest.threads) libraryUploads.push(upload(`${prefix}/handoffs/${thread.id}.md`,`handoffs/${thread.id}.md`,{kind:'thread-handoff',threadId:thread.id}))
   const plan = {
     schemaVersion:VERSION,kind:'claude-code-project-restore-plan',source:manifest.source,
@@ -320,8 +321,9 @@ export async function prepareProjectRestore(bundleDir,outputDir) {
     handoffs.push({threadId:thread.id,path:name})
   }
   const primaryMemory = manifest.files.find(file=>file.role==='memory'&&file.originalPath.replace(/^\//,'')==='MEMORY.md')
-  const memoryIndex = manifest.files.filter(file=>file.role==='memory').map(file=>`- ${line(file.originalPath)}: [original bytes](originals/${file.path})`).join('\n')
-  const note = Buffer.from(`\n\n## Prepared project handoff\n\n${provenance}\n[Main conversation](main-transcript.md)\n\n${handoffs.map(row=>`- [${row.threadId}](${row.path})`).join('\n')}\n${memoryIndex?`\n## Original memory files\n\n${memoryIndex}\n`:''}`)
+  const prefix = `migration/${manifest.source.projectId}`
+  const memoryIndex = manifest.files.filter(file=>file.role==='memory').map(file=>`- ${line(file.originalPath)}`).join('\n')
+  const note = Buffer.from(`\n\n## Prepared project handoff\n\n${provenance}\nThe project library contains the saved conversation state at these paths:\n\n- Main conversation: ${prefix}/main-transcript.md\n${handoffs.map(row=>`- Thread ${row.threadId}: ${prefix}/${row.path}`).join('\n')}\n${memoryIndex?`\n## Original memory paths\n\n${memoryIndex}\n`:''}`)
   outputs.set('MEMORY.md',Buffer.concat([primaryMemory?contents.get(primaryMemory.path):Buffer.from(`# ${line(manifest.source.title)}\n`),note]))
   for (const [name,data] of contents) outputs.set(`originals/${name}`,data)
   outputs.set('originals/manifest.json',json(manifest))

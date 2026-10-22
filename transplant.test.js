@@ -6841,6 +6841,13 @@ struct StateChecks {
         precondition(!checking.flowChecking && checking.flowPlan == nil)
         precondition(checking.flowError.contains("Could not read your Claude account"))
         let planJSON = #"{"from":{"account":"source","org":"personal"},"to":{"account":"target","org":"personal"},"count":1,"moving":true,"token":"fixture","resume":[]}"#
+        func finishProjectCheck() {
+            if let index = requests.firstIndex(where: { $0.0 == ["project-status", "--json"] }) {
+                let request = requests.remove(at: index)
+                request.1(#"{"selected":false,"canStage":false,"canMove":false,"projects":[]}"#)
+                request.2(0, "")
+            }
+        }
         checking.flowPlan = try! JSONDecoder().decode(LocalPlan.self, from: Data(planJSON.utf8))
         checking.refresh()
         precondition(checking.flowChecking && checking.flowError.isEmpty)
@@ -6852,12 +6859,14 @@ struct StateChecks {
         checking.startWorkflow()
         precondition(requests.count == 1)
         requests.removeFirst().2(1, "claude-transplant-resume: Could not verify your Claude account.")
+        finishProjectCheck()
         precondition(!checking.flowChecking && checking.flowPlan == nil)
         precondition(checking.flowError == "Could not verify your Claude account.")
         checking.refreshWorkflow()
         precondition(checking.flowChecking && checking.flowError.isEmpty)
         let verified = requests.removeFirst()
         verified.1(planJSON); verified.2(0, "")
+        finishProjectCheck()
         precondition(!checking.flowChecking && checking.flowError.isEmpty && checking.flowPlan?.to.account == "target")
         checking.refreshWorkflow()
         requests.removeFirst().2(0, "")
@@ -6865,7 +6874,21 @@ struct StateChecks {
         checking.refreshWorkflow()
         let setup = requests.removeFirst()
         setup.1(#"{"setup":true}"#); setup.2(0, "")
+        finishProjectCheck()
         precondition(!checking.flowChecking && checking.flowNeedsSource && checking.flowError.isEmpty)
+        checking.flowPlan = try! JSONDecoder().decode(LocalPlan.self, from: Data(planJSON.utf8))
+        checking.projectPlan = try! JSONDecoder().decode(ProjectPlan.self, from: Data(#"{"selected":true,"source":{"account":"source","org":"personal"},"current":{"account":"target","org":"personal"},"canStage":false,"canMove":true,"projects":[]}"#.utf8))
+        checking.startWorkflow()
+        precondition(requests.count == 1 && requests[0].0 == ["project-move", "--json"])
+        let projectMove = requests.removeFirst()
+        projectMove.1(#"{"done":true,"ok":true}"#); projectMove.2(0, "")
+        precondition(requests.count == 1 && requests[0].0.first == "local-move")
+        requests.removeFirst().2(1, "fixture local move failure")
+        let afterProject = requests.removeFirst()
+        precondition(afterProject.0 == ["local-plan", "--json"])
+        afterProject.1(#"{"setup":true}"#); afterProject.2(0, "")
+        finishProjectCheck()
+        precondition(requests.isEmpty && !checking.flowBusy && !checking.running)
         // Resume opens each conversation by its session ID, so a duplicate title cannot select another one.
         let resumeSession = "local_00000000-0000-4000-8000-000000000001"
         precondition(ClaudeResume.link(resumeSession)?.absoluteString == "claude://claude.ai/epitaxy/" + resumeSession)

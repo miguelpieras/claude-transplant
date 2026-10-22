@@ -41,7 +41,7 @@ function indexComplete(index) {
   return index.truncated!==true && index.sections.every(section=>Number(section.count)===section.data.length)
 }
 function rootSignature(index) {
-  return digest(rootsOf(index).map(root=>({id:root.id,replies:root.reply_count,lastReplyAt:root.last_reply_at,bindings:(root.bound_sessions??[]).map(row=>row.id).sort()})).sort((a,b)=>a.id.localeCompare(b.id)))
+  return digest(rootsOf(index).map(root=>({id:root.id,title:titleOf(root),status:root.thread_status,replies:root.reply_count,lastReplyAt:root.last_reply_at,bindings:(root.bound_sessions??[]).map(row=>row.id).sort()})).sort((a,b)=>a.id.localeCompare(b.id)))
 }
 function titleOf(root) {
   if (typeof root.display_name==='string' && root.display_name.trim()) return root.display_name
@@ -94,7 +94,7 @@ export async function loadArtifactExports(directory,projectId) {
   return exports
 }
 
-export async function collectProject(client,paths,projectId,{report=()=>{},artifactExports=new Map()}={}) {
+export async function collectProject(client,paths,projectId,{report=()=>{},artifactExports=new Map(),exportArtifact=null}={}) {
   if (!CHANNEL.test(projectId??'') || !UUID.test(client.account??'') || !UUID.test(client.org??'')) throw new Error('Verified source project, account, and organization are required')
   const base=`/v1/code/channels/${projectId}`
   const memoryBase=`/v1/code/memory/channel/${projectId}/memories`
@@ -156,6 +156,7 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
   if(!coordinatorIds.length) miss('coordinator','coordinator session ID is missing')
   for(const id of coordinatorIds){const value=await captureSession(id,'coordinator');if(value)capture.coordinator.sessionEvents.push(value)}
   const records=await attempt('localTranscripts','local session metadata',()=>localRecords(paths,client.account,client.org),[])
+  const localTranscriptChecks=[]
   for(const root of roots) {
     report(`Reading thread ${capture.threads.length+1} of ${roots.length}`)
     const bound=Array.isArray(root.bound_sessions)?root.bound_sessions:[]
@@ -168,7 +169,7 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
       if(matched.length===0)continue
       const record=matched[0]
       const transcript=await attempt('localTranscripts',`thread ${root.id} local transcript`,()=>localTranscript(paths,record),null)
-      if(transcript)capture.localTranscripts.push({threadId:root.id,recordId:record.sessionId,sessionId:transcript.id,bytes:transcript.bytes})
+      if(transcript){capture.localTranscripts.push({threadId:root.id,recordId:record.sessionId,sessionId:transcript.id,bytes:transcript.bytes});localTranscriptChecks.push({record,threadId:root.id,sha256:hash(transcript.bytes)})}
     }
   }
   report('Reading project memory and library')
@@ -238,8 +239,10 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
       const endpoint=kind==='attachment'?`${base}/attachments/${id}/content`:`${base}/attached_outputs/${id}`
       const value=await attempt('library',`${kind} ${id} bytes`,()=>kind==='artifact'&&typeof client.projectArtifact==='function'?client.projectArtifact(id):request(endpoint),null)
       if(kind==='artifact'&&value?.requiresContentExport){
-        const exported=artifactExports.get(id)
-        if(!exported||Date.parse(exported.updatedAt)!==Date.parse(value.metadata.updatedAt)||Date.parse(item.updated_at)!==Date.parse(value.metadata.updatedAt)){miss('library',`artifact ${id} needs a current text export (--artifact-exports)`);continue}
+        // A live exporter reads document content during this capture. The saved
+        // export map remains available for explicit, version-matched exports.
+        const exported=typeof exportArtifact==='function'?await attempt('library',`artifact ${id} text export`,()=>exportArtifact({projectId,id,metadata:value.metadata,indexEntry:item}),null):artifactExports.get(id)
+        if(!exported||!(Buffer.isBuffer(exported.bytes)||exported.bytes instanceof Uint8Array)||!exported.bytes.length||Date.parse(exported.updatedAt)!==Date.parse(value.metadata.updatedAt)||Date.parse(item.updated_at)!==Date.parse(value.metadata.updatedAt)){miss('library',`artifact ${id} needs a current text export (--artifact-exports)`);continue}
         capture.libraryFiles.push({id:`artifact-${id}-text`,name:`${id}.txt`,originalPath:`artifacts/${id}/report.txt`,bytes:exported.bytes,captureFormat:'text-and-links',nativeStateCaptured:false})
         ;(capture.channel.libraryIndex.artifactCaptures??=[]).push({id,metadata:{...value.metadata,captureFormat:'text-and-links',nativeStateCaptured:false,normalizedTextSha256:exported.normalizedTextSha256??null}})
         capture.limitations.push(`Artifact ${id} is captured as text and links. Native layout and widget state are not included.`)
@@ -263,6 +266,8 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
   capture.channel.libraryIndex.attachedOutputs=[...outputs.values()]
   for(const [id,metadata] of outputs){if(capture.libraryFiles.some(file=>file.id===`artifact-${id}`||metadata?.kind==='frame'&&file.id.startsWith(`artifact-${metadata.frame_slug}-`)))continue;const value=await attempt('library',`attached output ${id}`,()=>request(`${base}/attached_outputs/${id}`),null);const bytes=await attempt('library',`attached output ${id} bytes`,async()=>decodeBytes(value),null);if(bytes)capture.libraryFiles.push({id:`output-${id}`,name:typeof metadata==='object'?(metadata.filename??metadata.title??id):id,bytes})}
   report('Checking source consistency')
+  const finalChannel=await attempt('channel','final project metadata',()=>request(base),null)
+  if(finalChannel&&(!object(finalChannel.channel)||digest(finalChannel.channel)!==digest(channel)))miss('channel','project metadata changed during capture')
   const finalIndex=await attempt('roots','final thread index',()=>request(`${base}/threads?limit=100`),null)
   if(finalIndex&&initialIndex){const stable=await attempt('roots','thread index consistency',async()=>rootSignature(initialIndex)===rootSignature(finalIndex),false);if(!stable){miss('roots','thread list changed during capture');miss('threads','thread history changed during capture');miss('coordinator','project messages can have changed during capture')}}
   const timelineRead=()=>pages(`${base}/timeline`,'coordinator','main conversation',{query:{limit:'200',include_replies:'true',include_bound_session_rows:'true'}})
@@ -276,7 +281,12 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
   if(memoryIndex&&finalMemory&&digest(memoryIndex)!==digest(finalMemory))miss('memory','memory changed during capture')
   const finalLibrary=await attempt('library','final project files index',listFiles,null)
   if(libraryIndex&&finalLibrary&&digest(libraryIndex)!==digest(finalLibrary))miss('library','project files changed during capture')
+  for(const [kind,initial,endpoint] of [['artifact',artifacts,`${base}/artifacts?limit=50`],['attachment',attachments,`${base}/attachments?limit=100`]]){
+    const final=await attempt('library',`final ${kind} index`,()=>request(endpoint),null)
+    if(final&&(!Array.isArray(final.data)||digest(final)!==digest(initial)))miss('library',`${kind} index changed during capture`)
+  }
   for(const [file,revision] of fileRevisions){if(revision===undefined)continue;const value=await attempt('library',`file ${file} final revision`,()=>post(`${base}/files:open`,{path:file,range_offset:0,range_length:1}),null);if(value&&value.content_revision!==revision)miss('library',`file ${file} revision changed during capture`)}
+  for(const check of localTranscriptChecks){const final=await attempt('localTranscripts',`thread ${check.threadId} final local transcript`,()=>localTranscript(paths,check.record),null);if(final&&hash(final.bytes)!==check.sha256)miss('localTranscripts',`thread ${check.threadId} local transcript changed during capture`)}
   capture.source.capturedAt=new Date().toISOString()
   return capture
 }

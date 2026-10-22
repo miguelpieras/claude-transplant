@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm test
-      - run: swiftc -parse-as-library -typecheck menubar.swift workflow.swift
+      - run: swiftc -parse-as-library -typecheck menubar.swift workflow.swift project-artifact-export.swift
       - run: npm pack && npm install -g ./miguelpieras-claude-transplant-*.tgz && claude-transplant-resume --version && claude-transplant-resume --help
         env:
           npm_config_min_release_age: 7

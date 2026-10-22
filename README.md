@@ -9,7 +9,7 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 Requires macOS 13 or later, Node.js 22 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`).
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.6
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.7
 claude-transplant-resume menubar
 ```
 
@@ -64,7 +64,7 @@ The app is compiled locally and is not notarized. Rebuilding or updating it can 
 - Scheduled-task settings move with their records; disabled tasks stay disabled. Scheduled runs are not resumed by this button.
 - Account verification reads the current Claude Desktop login, including its cookie database and Safe Storage key in macOS Keychain. It makes authenticated requests only to `https://claude.ai` to read account and organization metadata. Successful checks are cached for up to five minutes. No cookie or key is saved in the fork's settings.
 - The app stores account labels, record IDs, and move/resume metadata locally in `~/Library/Application Support/claude-transplant-resume/`. Do not upload that folder to a public issue.
-- The menubar workflow does not migrate ordinary Claude web chats or Projects, change subscriptions, or reconcile remote-only conversations. It supports a verified Personal Max/Pro destination; Team and Enterprise destinations are blocked.
+- The local conversation workflow does not move ordinary Claude web chats or remote-only conversations. Code Projects use the separate preparation and transfer controls described below. A destination must be a verified Personal Max/Pro plan; Team and Enterprise destinations are blocked.
 
 The original advanced CLI remains in the source. Its `--cloud` mode can read and modify Remote Control state; it is separate from this menubar workflow. Refer to the [upstream 4.1.2 documentation](https://github.com/vitaliyhayda/claude-transplant/tree/v4.1.2), substituting the `claude-transplant-resume` command. Do not mix that workflow with an active collection.
 
@@ -79,9 +79,31 @@ npm uninstall -g @miguelpieras/claude-transplant
 
 Removal stops the app and removes its login item. It retains local move metadata so removal cannot silently discard recovery state.
 
-## Prepare a Code Project for another account
+## Transfer a Code Project in its latest state
 
-The CLI can capture a Code Project and prepare files for a rebuild in another account. These commands do not change the source project, sign out, create a destination project, send messages, or resume work. They are separate from the menu bar's local conversation mover.
+Select the project in the menu bar while signed into its source account. Use **Prepare for account switch** when you want to transfer it. Preparation pauses the source project, requires idle workers, reads its latest state, and verifies the capture. It does not use the old capture from an earlier transfer. Missing content or a changing source prevents a ready result. Keep the source paused after preparation.
+
+Keep the Mac unlocked and Claude open during preparation. Current native report text is read through Claude's Accessibility interface. Enable **Claude Transplant Resume** in macOS Accessibility settings if requested. A locked Mac, an unreadable report, or a report whose ID cannot be checked stops preparation; an older saved report is never used.
+
+Then sign into the destination Personal plan. Use **Transplant project**, or use **Move and resume** to transfer the prepared project before the local conversations. The project transfer creates a new private project, uploads and reads back the prepared files and memory, and leaves the destination paused. It does not send messages or start its workers. An interrupted upload can resume in the same new project.
+
+The project selection follows its new destination. Before another transfer, prepare it again from that account. Changes made after preparation require a fresh preparation. The tool does not retain source login cookies, so preparation must finish before you sign out of the source account.
+
+The same flow is available in the CLI:
+
+```sh
+claude-transplant-resume project-select \
+  --project chan_PROJECT_ID --source ACCOUNT_UUID/ORGANIZATION_UUID
+claude-transplant-resume project-stage
+# Switch accounts in Claude Desktop.
+claude-transplant-resume project-move
+```
+
+`project-status --json` shows the selection and whether it can be prepared or transferred. Source and destination projects remain available. A transfer rebuilds the current state in a new project; it does not change ownership of the source project.
+
+### Saved captures
+
+The read-only capture commands remain available for an explicit fixed capture. They do not pause the source, create a destination, or start work.
 
 While signed into the source account in Claude Desktop, run:
 
@@ -123,7 +145,7 @@ The capture checks the export's file hash and source update time. It reports tex
 
 Preparation verifies every saved file and writes `restore-plan.json`, `RESTORE.md`, a main transcript, and a handoff for each thread. Original captured bytes remain available. The plan includes portable settings and file upload mappings, requires a paused destination, and permits no overwrites or automatic thread starts. Account-specific connections, environments, permissions, and device access require separate setup.
 
-This is project rebuild preparation, not a native history import. Claude does not currently support moving a project's threads to another project. The prepared files preserve history as reference; a destination would use new threads. The capture uses private Claude interfaces, which can change. Remote restore and automatic project creation are not implemented by these commands.
+Project transfer rebuilds the project; it does not import native thread history. The prepared files preserve the main conversation and each thread as reference files for new work. Account-specific connections and device permissions require setup in the destination. Native report layout and widget state are not included in text exports. These commands use private Claude interfaces, which can change.
 
 ## Development and verification
 
@@ -131,11 +153,11 @@ This is project rebuild preparation, not a native history import. Claude does no
 git clone https://github.com/miguelpieras/claude-transplant.git
 cd claude-transplant
 npm test
-swiftc -parse-as-library -typecheck menubar.swift workflow.swift
+swiftc -parse-as-library -typecheck menubar.swift workflow.swift project-artifact-export.swift
 npm pack --dry-run
 ```
 
-There are no runtime npm dependencies. `transplant.js` keeps the upstream engine and account discovery. `local-workflow.mjs` isolates collection selection, local moves, and recovery. `project-source.mjs` reads Code Project data, and `project-workflow.mjs` verifies captures and prepares rebuild files. `workflow.swift` holds the resume controls and native Accessibility operations. Tests use synthetic records and transcripts.
+There are no runtime npm dependencies. `transplant.js` keeps the upstream engine and account discovery. `local-workflow.mjs` isolates collection selection, local moves, and recovery. `project-source.mjs` reads Code Project data, and `project-workflow.mjs` verifies captures and prepares rebuild files. `project-transfer.mjs` stages current project state and restores it, and `project-cli.mjs` keeps the selected project across account switches. `workflow.swift` holds the native controls and Accessibility operations. Tests use synthetic records and transcripts.
 
 The local predecessor was tested with live moves and resumed conversations on macOS 15.7.9 and Claude Desktop 2.26454.2. The release checks cover synthetic fresh setup, moves, collisions, rollback, crash recovery, resume selection, packaging, and Swift compilation. Wider macOS and Claude Desktop compatibility is untested. Claude's local file format, log messages, and controls can change.
 

@@ -163,6 +163,72 @@ test('Pages reports require a current explicit content export and preserve its t
   assert.equal(saved.libraryFiles.find(file=>file.id===`artifact-${id}-text`).nativeStateCaptured,false)
 })
 
+test('a live report exporter reads current content and cannot fall back to an older export',async()=>{
+  const id='77777777-7777-4777-8777-777777777777',updatedAt='2026-10-22T11:00:00Z',bytes=Buffer.from('Current report text')
+  const {client}=fixture({request(u){if(u.pathname.endsWith('/artifacts'))return {data:[{slug:id,title:'Report',updated_at:updatedAt}],total:1,truncated:false}}})
+  client.projectArtifact=async()=>({requiresContentExport:true,metadata:{id,updatedAt,contentStore:'pages'}})
+  const calls=[]
+  const saved=await collectProject(client,{},PROJECT,{artifactExports:new Map([[id,{bytes:Buffer.from('Old text'),updatedAt:'2026-10-21T10:00:00Z'}]]),exportArtifact:async request=>{calls.push(request);return {bytes,updatedAt}}})
+  assert.equal(saved.complete.library,true)
+  assert.equal(saved.libraryFiles.find(file=>file.id===`artifact-${id}-text`).bytes.toString(),'Current report text')
+  assert.equal(calls.length,1)
+  assert.equal(calls[0].projectId,PROJECT)
+  assert.equal(calls[0].id,id)
+  assert.equal(calls[0].metadata.updatedAt,updatedAt)
+  assert.equal(calls[0].indexEntry.slug,id)
+  const stale=await collectProject(client,{},PROJECT,{artifactExports:new Map([[id,{bytes,updatedAt}]]),exportArtifact:async()=>({bytes,updatedAt:'2026-10-21T10:00:00Z'})})
+  assert.equal(stale.complete.library,false)
+  assert.equal(stale.libraryFiles.some(file=>file.id===`artifact-${id}-text`),false)
+})
+
+test('changed report or attachment indexes prevent a complete capture',async()=>{
+  for(const kind of ['artifacts','attachments']){
+    let reads=0
+    const {client}=fixture({request(u){if(u.pathname.endsWith(`/${kind}`))return {data:++reads===1?[]:[{slug:'new-report',file_id:'new-file'}],total:reads===1?0:1,truncated:false}}})
+    const capture=await collectProject(client,{},PROJECT)
+    assert.equal(capture.complete.library,false,kind)
+    assert.ok(capture.missing.some(row=>row.includes(`${kind.slice(0,-1)} index changed during capture`)))
+  }
+})
+
+test('changed project metadata prevents a complete capture',async()=>{
+  let reads=0
+  const {client,channel}=fixture({request(u){if(u.pathname===`/v1/code/channels/${PROJECT}`)return {channel:{...channel,name:++reads===1?'Founderizer':'New project name'}}}})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.source.title,'Founderizer')
+  assert.equal(capture.complete.channel,false)
+  assert.ok(capture.missing.some(row=>row.includes('project metadata changed during capture')))
+})
+
+test('changed thread titles and states prevent a complete capture without new replies',async()=>{
+  for(const change of [{display_name:'Renamed task'},{thread_status:'resolved'}]){
+    let reads=0
+    const {client,index}=fixture({request(u){if(u.pathname.endsWith('/threads')){const value=clone(index);if(++reads===2)Object.assign(value.sections[0].data[0],change);return value}}})
+    const capture=await collectProject(client,{},PROJECT)
+    assert.equal(capture.complete.roots,false)
+    assert.equal(capture.complete.threads,false)
+  }
+})
+
+test('a linked local transcript that grows during capture prevents completeness',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'project-source-growing-'))
+  const recordId='local_33333333-3333-4333-8333-333333333333',sessionId='44444444-4444-4444-8444-444444444444'
+  const paths={records:path.join(dir,'records'),pool:path.join(dir,'pool')},cwd='/source/repo',bytes=Buffer.from('{"type":"assistant","text":"Initial state"}\n')
+  const file=path.join(paths.pool,'-source-repo',`${sessionId}.jsonl`)
+  let reads=0
+  try{
+    await mkdir(path.join(paths.records,ACCOUNT,ORG),{recursive:true})
+    await mkdir(path.dirname(file),{recursive:true})
+    await writeFile(path.join(paths.records,ACCOUNT,ORG,`${recordId}.json`),JSON.stringify({sessionId:recordId,cliSessionId:sessionId,cwd,bridgeSessionIds:['cse_worker']}))
+    await writeFile(file,bytes)
+    const {client}=fixture({async request(u){if(u.pathname===`/v1/code/channels/${PROJECT}`&&++reads===2)await writeFile(file,Buffer.concat([bytes,Buffer.from('{"type":"assistant","text":"Later state"}\n')]))}})
+    const capture=await collectProject(client,paths,PROJECT)
+    assert.equal(capture.localTranscripts[0].bytes.toString(),bytes.toString())
+    assert.equal(capture.complete.localTranscripts,false)
+    assert.ok(capture.missing.some(row=>row.includes('local transcript changed during capture')))
+  }finally{await rm(dir,{recursive:true,force:true})}
+})
+
 test('artifact export loader rejects a different project, changed bytes, and path traversal',async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'project-text-exports-'))
   const id='77777777-7777-4777-8777-777777777777',file=`${id}.txt`,bytes=Buffer.from('Original report')

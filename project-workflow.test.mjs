@@ -203,6 +203,7 @@ test('restore plan keeps portable config, lists scoped settings, and maps local 
   assert.equal(plan.autoResume,false)
   assert.equal(plan.overwriteExisting,false)
   assert.deepEqual(plan.memoryUploads.map(item=>item.path).sort(),['/MEMORY.md','/notes/work.md'])
+  assert.equal(plan.memoryUploads.find(item=>item.path==='/MEMORY.md').sourcePath,'MEMORY.md')
   assert(plan.libraryUploads.some(item=>item.path==='/docs/data.bin'&&item.kind==='original-library'))
   assert(plan.libraryUploads.some(item=>item.path==='migration/chan_project1/main-transcript.md'))
   assert(plan.libraryUploads.some(item=>item.path==='migration/chan_project1/handoffs/thread_1.md'))
