@@ -299,6 +299,7 @@ export async function runLocal(paths,command,token,emit,{source=null,includeResu
     if(plan.setup)throw new Error('Select the source account first')
     if(plan.token!==token)throw new Error('The account or session list changed. Refresh and try again.')
     if(plan.moving){
+      await (await import('./local-capture.mjs')).verifyLocalMoveCapture(paths,plan)
       emit({stage:'close',text:'Closing Claude briefly'})
       await quitDesktop(paths)
       try{if(plan.recovery)await recoverLocal(paths);emit({stage:'move',text:`Moving ${plan.count} records`});await moveRecords(paths,plan)}

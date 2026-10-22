@@ -1,6 +1,6 @@
 {
   "name": "@miguelpieras/claude-transplant",
-  "version": "4.1.3-resume.9",
+  "version": "4.1.3-resume.10",
   "description": "Move Claude Code projects and local conversations to a verified Personal plan, then resume interrupted work. Unofficial macOS beta.",
   "type": "module",
   "bin": {
@@ -10,13 +10,12 @@
     "transplant.js",
     "menubar.swift",
     "local-workflow.mjs",
+    "local-capture.mjs",
     "project-workflow.mjs",
     "project-source.mjs",
     "project-transfer.mjs",
     "project-cli.mjs",
     "project-artifacts.mjs",
-    "project-web.mjs",
-    "source-web.swift",
     "project-resume.mjs",
     "project-native-artifacts.mjs",
     "project-artifact-export.swift",

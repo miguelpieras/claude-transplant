@@ -50,9 +50,9 @@ const HELP = `claude-transplant-resume   move Claude Code history between accoun
   claude-transplant-resume project-prepare --capture <folder> --output <folder>  prepare files for a project rebuild
   claude-transplant-resume project-status --json  show the source account and all its projects
   claude-transplant-resume project-select --project <chan_id> --source <account/org>  select a project for an advanced manual capture
-  claude-transplant-resume project-connect  sign into the source independently of Claude Desktop
+  claude-transplant-resume project-stage-all  save all source projects and local conversations before sign-out
   claude-transplant-resume project-stage  manually pause and capture the selected source project
-  claude-transplant-resume project-move  read all current source projects, move them, and request continuation
+  claude-transplant-resume project-move  restore the saved projects in the new account and request continuation
 
   --from <match> --to <match>   skip the picker, match on email, org name, or uuid prefix
   --cloud                       reconcile active source, queue remaining local work and known source mirrors
@@ -4165,7 +4165,7 @@ const plist = (dict) => {
 }
 
 const compileMenubar = (source, binary) => {
-  const build = spawnSync('swiftc', ['-O', '-parse-as-library', '-o', binary, source, path.join(path.dirname(source), 'workflow.swift'), path.join(path.dirname(source), 'project-artifact-export.swift'), path.join(path.dirname(source),'source-web.swift')], { encoding: 'utf8' })
+  const build = spawnSync('swiftc', ['-O', '-parse-as-library', '-o', binary, source, path.join(path.dirname(source), 'workflow.swift'), path.join(path.dirname(source), 'project-artifact-export.swift')], { encoding: 'utf8' })
   if (build.error) throw new Error('swiftc not found, run xcode-select --install')
   if (build.status !== 0) throw new Error(`swiftc failed\n${build.stderr.trim()}`)
 }
@@ -4200,7 +4200,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
     }
     return `snapshot written | ${output}`
   }
-  const key = sha((await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE,'project-artifact-export.swift'),'utf8')) + (await readFile(path.join(HERE,'source-web.swift'),'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
+  const key = sha((await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE,'project-artifact-export.swift'),'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
   const built = path.join(app, 'Contents/Resources/build.sha256')
   if ((await readFile(built, 'utf8').catch(() => '')) !== key) {
     const fresh = `${app}.building`
@@ -4229,7 +4229,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
   const script = path.join(app, 'Contents/Resources/transplant.js')
   await copyFile(path.join(HERE, 'transplant.js'), script)
   await copyFile(path.join(HERE, 'local-workflow.mjs'), path.join(app, 'Contents/Resources/local-workflow.mjs'))
-  for (const name of ['project-workflow.mjs', 'project-source.mjs', 'project-transfer.mjs', 'project-cli.mjs', 'project-artifacts.mjs', 'project-web.mjs', 'project-native-artifacts.mjs', 'project-resume.mjs']) await copyFile(path.join(HERE, name), path.join(app, 'Contents/Resources', name))
+  for (const name of ['local-capture.mjs', 'project-workflow.mjs', 'project-source.mjs', 'project-transfer.mjs', 'project-cli.mjs', 'project-artifacts.mjs', 'project-native-artifacts.mjs', 'project-resume.mjs']) await copyFile(path.join(HERE, name), path.join(app, 'Contents/Resources', name))
   await copyFile(path.join(HERE, 'package.json'), path.join(app, 'Contents/Resources/package.json'))
   const config = jsonText({ node: process.execPath, script })
   await writeFile(path.join(paths.state, 'menubar.json'), config)
@@ -4284,7 +4284,7 @@ function parse(argv) {
   if (args.cmd === 'local-source' && !args.source) throw new Error('local-source requires --source <account/org>')
   if (args.noResume && !['local-plan','local-move','project-move'].includes(args.cmd)) throw new Error('--no-resume requires local-plan, local-move, or project-move')
   if (args.limitsOnly && (!['local-plan','local-move'].includes(args.cmd) || args.noResume)) throw new Error('--limits-only requires local-plan or local-move without --no-resume')
-  const projectCommand = ['project-capture','project-verify','project-prepare','project-status','project-select','project-connect','project-stage','project-move'].includes(args.cmd)
+  const projectCommand = ['project-capture','project-verify','project-prepare','project-status','project-select','project-stage-all','project-stage','project-move'].includes(args.cmd)
   if (!projectCommand && (args.project || args.output || args.capture)) throw new Error('--project, --output, and --capture require a project command')
   if (args.artifactExports && args.cmd!=='project-capture') throw new Error('--artifact-exports requires project-capture')
   if (projectCommand) {
@@ -4293,7 +4293,7 @@ function parse(argv) {
     if (args.cmd === 'project-verify' && (!args.capture || args.project || args.output)) throw new Error('project-verify requires only --capture <folder>')
     if (args.cmd === 'project-prepare' && (!args.capture || !args.output || args.project)) throw new Error('project-prepare requires --capture <folder> --output <folder>')
     if (args.cmd === 'project-select' && (!/^chan_[A-Za-z0-9]+$/.test(args.project??'') || !new RegExp(`^${UUID_PATTERN}/${UUID_PATTERN}$`,'i').test(args.source??'') || args.output || args.capture)) throw new Error('project-select requires --project <chan_id> --source <account/org>')
-    if (['project-status','project-connect','project-stage','project-move'].includes(args.cmd) && (args.project || args.source || args.output || args.capture)) throw new Error(`${args.cmd} uses the selected project and accepts only --json`)
+    if (['project-status','project-stage-all','project-stage','project-move'].includes(args.cmd) && (args.project || args.source || args.output || args.capture)) throw new Error(`${args.cmd} uses the source account and accepts only --json`)
   }
   return args
 }
@@ -4309,7 +4309,7 @@ async function main(argv) {
   const paths = layout()
   const out = process.stdout
   const emit = (o) => out.write(`${JSON.stringify(o)}\n`)
-  if (['project-status','project-select','project-connect','project-stage','project-move'].includes(args.cmd)) {
+  if (['project-status','project-select','project-stage-all','project-stage','project-move'].includes(args.cmd)) {
     const {runProjectCommand}=await import('./project-cli.mjs')
     return runProjectCommand(paths,args,args.json?emit:value=>out.write(`${value.text??JSON.stringify(value)}\n`))
   }

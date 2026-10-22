@@ -38,7 +38,9 @@ struct ProjectPlan: Decodable {
     let current: LocalAccount?
     let canStage: Bool
     let canMove: Bool
-    let sourceConnected: Bool?
+    let phase: String?
+    let ready: Bool?
+    let localCount: Int?
     let preparedAt: String?
     let note: String?
     let projects: [Project]
@@ -53,6 +55,9 @@ struct LocalResult: Decodable {
     let paused: Bool?
     let accepted: Bool?
     let count: Int?
+    let ready: Bool?
+    let localCount: Int?
+    let preparedAt: String?
 }
 struct ResumeStatus: Decodable {
     struct Row: Decodable {
@@ -119,6 +124,39 @@ extension Model {
         return accepted ? "Moved \(projects). Continuation requests accepted." : "Moved \(projects). The projects are paused."
     }
 
+    func prepareWorkflow() {
+        guard let plan = flowPlan, !plan.moving, !flowBusy, !flowChecking else { return }
+        guard projectError.isEmpty, let project = projectPlan, project.canStage,
+              let current = project.current, current.account == plan.to.account, current.org == plan.to.org else {
+            flowActionError = projectError.isEmpty ? "The source account could not be checked. Refresh before you copy it." : projectError
+            refreshProjectWorkflow(force: true)
+            return
+        }
+        flowBusy = true
+        running = true
+        flowActionError = ""
+        lines = []
+        note = "Saving projects and conversations on this Mac"
+        var result: LocalResult?
+        run(["project-stage-all", "--json"], line: { [weak self] line in
+            guard let data = line.data(using: .utf8), let event = try? JSONDecoder().decode(LocalResult.self, from: data) else { return }
+            if let text = event.text { self?.note = text }
+            if event.done == true { result = event }
+        }) { [weak self] status, error in
+            guard let self else { return }
+            flowBusy = false
+            running = false
+            if status == 0, result?.ok == true, result?.ready == true {
+                note = "Ready to switch accounts. Sign out of Claude, then sign into the new Personal plan."
+                lines.append(("saved", "Saved \(result?.localCount ?? plan.count) conversations and \(result?.count ?? project.count ?? 0) projects on this Mac."))
+            } else {
+                flowActionError = error.isEmpty ? "The local copy is incomplete. Keep the source account signed in and click Transplant again." : error
+            }
+            projectRefreshedAt = nil
+            refreshWorkflow()
+        }
+    }
+
     func chooseWorkflowSource() {
         guard !flowSource.isEmpty, !flowBusy else { return }
         flowBusy = true
@@ -155,10 +193,14 @@ extension Model {
                 flowActionError = "The project source or destination changed. Refresh before you move."
                 return
             }
+            guard project.ready == true, project.canMove else {
+                flowActionError = "Return to the source account and click Transplant before you switch accounts."
+                return
+            }
             flowBusy = true
             running = true
             lines = []
-            note = "Reading and moving all projects"
+            note = "Restoring the saved projects"
             var result: LocalResult?
             var projectArgs = ["project-move", "--json"]
             if !flowResume { projectArgs.append("--no-resume") }
@@ -363,7 +405,7 @@ struct WorkflowPanel: View {
                 Text(plan.moving ? "TO" : "CURRENT PLAN").font(.caption).foregroundStyle(.secondary)
                 Text(plan.to.label ?? plan.to.account).font(.callout.weight(.semibold))
                 HStack(spacing: 4) {
-                    Text("\(plan.count) conversations")
+                    Text("\(model.projectPlan?.ready == true ? model.projectPlan?.localCount ?? plan.count : plan.count) conversations")
                     Text("·")
                     if let count = model.projectPlan?.count {
                         Text(count == 1 ? "1 project" : "\(count) projects")
@@ -371,13 +413,26 @@ struct WorkflowPanel: View {
                         Text("All projects included")
                     }
                 }.font(.caption).foregroundStyle(.secondary)
-                if !plan.resume.isEmpty { Text("\(plan.resume.count) recent resume candidates").font(.caption).foregroundStyle(.secondary) }
-                if !plan.moving { Text("Sign into another Personal plan in Claude to move there.").font(.caption).foregroundStyle(.secondary) }
-                Toggle("Resume stopped conversations", isOn: $model.flowResume).font(.caption).disabled(model.flowBusy)
-                if model.flowResume && !plan.resume.isEmpty { Text("Sends a Continue message to unfinished conversations active in the last 24 hours.").font(.caption).foregroundStyle(.secondary) }
-                Button(plan.recovery == true ? "Recover move" : plan.moving ? (model.flowResume ? "Move and resume" : "Move") : "Resume stopped") { model.startWorkflow() }
-                    .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking || (!plan.moving && (plan.resume.isEmpty || !model.flowResume)))
-                if !plan.moving && plan.recovery != true {
+                if model.flowBusy && !plan.moving {
+                    Text(model.note).font(.caption).foregroundStyle(.secondary)
+                } else if plan.moving && model.projectPlan?.ready == true && model.projectPlan?.canMove != true {
+                    Text(model.projectPlan?.note ?? "Sign into the saved destination account to finish this move.").font(.caption).foregroundStyle(.orange)
+                } else if model.projectPlan?.ready == true {
+                    Text(plan.moving ? "Saved copy ready" : "Ready to switch accounts").font(.callout.weight(.semibold))
+                    Text(plan.moving ? "Restore the saved projects and conversations with this account." : "Sign out of Claude, then sign into the new Personal plan.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(plan.moving ? "Return to the source account and click Transplant before you switch accounts." : "Click Transplant to save your projects and conversations on this Mac. Wait for Ready to switch accounts before you sign out.").font(.caption).foregroundStyle(.secondary)
+                }
+                if plan.moving {
+                    Toggle("Resume stopped conversations", isOn: $model.flowResume).font(.caption).disabled(model.flowBusy)
+                    if model.flowResume && !plan.resume.isEmpty { Text("Sends a Continue message to unfinished conversations active in the last 24 hours.").font(.caption).foregroundStyle(.secondary) }
+                    Button(plan.recovery == true ? "Recover move" : model.flowResume ? "Move and resume" : "Move") { model.startWorkflow() }
+                        .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking || model.projectPlan?.ready != true || model.projectPlan?.canMove != true)
+                } else {
+                    Button("Transplant") { model.prepareWorkflow() }
+                        .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking || model.projectPlan?.canStage != true)
+                }
+                if !plan.moving && plan.recovery != true && model.projectPlan?.ready != true {
                     Button("Resume limit-stopped (\(plan.limitResumeCount ?? 0))") { model.startWorkflow(limitsOnly: true) }
                         .disabled(model.flowBusy || model.flowChecking || (plan.limitResumeCount ?? 0) == 0)
                     Text("Retries usage-limit errors from the last 24 hours on this account.").font(.caption).foregroundStyle(.secondary)

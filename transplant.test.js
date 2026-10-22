@@ -6878,7 +6878,7 @@ struct StateChecks {
         finishProjectCheck()
         precondition(!checking.flowChecking && checking.flowNeedsSource && checking.flowError.isEmpty)
         checking.flowPlan = try! JSONDecoder().decode(LocalPlan.self, from: Data(planJSON.utf8))
-        checking.projectPlan = try! JSONDecoder().decode(ProjectPlan.self, from: Data(#"{"selected":false,"count":0,"source":{"account":"source","org":"personal"},"current":{"account":"target","org":"personal"},"canStage":false,"canMove":false,"sourceConnected":false,"projects":[]}"#.utf8))
+        checking.projectPlan = try! JSONDecoder().decode(ProjectPlan.self, from: Data(#"{"selected":false,"count":0,"source":{"account":"source","org":"personal"},"current":{"account":"target","org":"personal"},"canStage":false,"canMove":true,"ready":true,"projects":[]}"#.utf8))
         checking.startWorkflow()
         precondition(requests.count == 1 && requests[0].0 == ["project-move", "--json"])
         let projectMove = requests.removeFirst()
@@ -6890,6 +6890,19 @@ struct StateChecks {
         afterProject.1(#"{"setup":true}"#); afterProject.2(0, "")
         finishProjectCheck()
         precondition(requests.isEmpty && !checking.flowBusy && !checking.running)
+        let sourcePlanJSON = #"{"from":{"account":"source","org":"personal"},"to":{"account":"source","org":"personal"},"count":1,"moving":false,"token":"fixture","resume":[]}"#
+        checking.flowPlan = try! JSONDecoder().decode(LocalPlan.self, from: Data(sourcePlanJSON.utf8))
+        checking.projectPlan = try! JSONDecoder().decode(ProjectPlan.self, from: Data(#"{"selected":true,"count":2,"source":{"account":"source","org":"personal"},"current":{"account":"source","org":"personal"},"canStage":true,"canMove":false,"ready":false,"projects":[]}"#.utf8))
+        checking.prepareWorkflow()
+        precondition(checking.flowBusy && checking.running && requests.count == 1 && requests[0].0 == ["project-stage-all", "--json"])
+        let prepare = requests.removeFirst()
+        prepare.1(#"{"done":true,"ok":true,"ready":true,"count":2,"localCount":1}"#); prepare.2(0, "")
+        precondition(!checking.flowBusy && !checking.running && checking.note.contains("Ready to switch accounts"))
+        let afterPrepare = requests.removeFirst()
+        precondition(afterPrepare.0 == ["local-plan", "--json"])
+        afterPrepare.1(sourcePlanJSON); afterPrepare.2(0, "")
+        finishProjectCheck()
+        precondition(requests.isEmpty)
         // Resume opens each conversation by its session ID, so a duplicate title cannot select another one.
         let resumeSession = "local_00000000-0000-4000-8000-000000000001"
         precondition(ClaudeResume.link(resumeSession)?.absoluteString == "claude://claude.ai/epitaxy/" + resumeSession)

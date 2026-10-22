@@ -183,6 +183,12 @@ async function preparation(root) {
   for(const upload of [...plan.memoryUploads,...plan.libraryUploads]){const bytes=contents.get(upload.sourcePath);if(!bytes||bytes.length!==upload.bytes||sha(bytes)!==upload.sha256)fail('A restore upload does not match its verified bytes')}
   return{stageRoot,transfer,plan,contents}
 }
+
+export async function verifyPreparedProjectTransfer(preparationDir){
+  const root=await safe(preparationDir,'directory')
+  const {transfer}=await preparation(root)
+  return{complete:true,source:transfer.source,projectId:transfer.source.projectId,hasConversationWork:transfer.hasConversationWork,preparedPath:root}
+}
 const profile=channel=>Object.fromEntries(['id','name','topic','icon','color','visibility','created_by_account_id','created_at','disabled_at'].map(key=>[key,channel[key]??null]))
 const creationProfile=channel=>({...profile(channel),disabled_at:null})
 async function unusedDestination(client,id) {if(rootsOf(await client.projectRequest(`/v1/code/channels/${id}/threads?limit=100`)).length||(await messagePages(client,`/v1/code/channels/${id}/timeline`,{include_replies:'true',include_bound_session_rows:'true'})).length)fail('The destination project has new conversation work; restore cannot change it')}
