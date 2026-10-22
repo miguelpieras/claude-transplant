@@ -19,10 +19,32 @@ const safeError = error => { const status=String(error?.message??'').match(/(?:r
 const decodeBytes = value => {
   if(Buffer.isBuffer(value?.bytes)||value?.bytes instanceof Uint8Array)return Buffer.from(value.bytes)
   if(value?.type==='text'&&typeof value.content==='string')return Buffer.from(value.content)
-  if(['content','download'].includes(value?.type)&&typeof value.data==='string'&&/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.data))return Buffer.from(value.data,'base64')
+  if(['content','download'].includes(value?.type)&&typeof value.data==='string'){const bytes=Buffer.from(value.data,'base64');if(bytes.toString('base64')===value.data)return bytes}
   throw new Error('Output bytes are absent')
 }
 const safeMetadata = value => Object.fromEntries(SESSION_FIELDS.filter(key=>value?.[key]!==undefined && key!=='session_context').map(key=>[key,value[key]]))
+
+export async function readProjectFileBytes(client,projectId,file) {
+  if(!CHANNEL.test(projectId??'')||!safePath(file))throw new Error('Invalid project file path')
+  const open=body=>client.projectRequest(`/v1/code/channels/${projectId}/files:open`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({path:file,...body})})
+  const value=await open({})
+  if(value?.type!=='unsupported'||value.reason!=='too_large'){
+    const bytes=decodeBytes(value)
+    if(value.truncated===true||value.size_bytes!==undefined&&Number(value.size_bytes)!==bytes.length)throw new Error('Library byte length changed')
+    return{bytes,revision:value.content_revision}
+  }
+  const total=Number(value.size_bytes),chunkSize=16*1024*1024,chunks=[]
+  if(!Number.isSafeInteger(total)||total<=0||total>480_000_000)throw new Error('Library range byte length is invalid')
+  let revision
+  for(let offset=0;offset<total;offset+=chunkSize){
+    const length=Math.min(chunkSize,total-offset),part=await open({range_offset:offset,range_length:length})
+    if(Number(part?.size_bytes)!==total||typeof part?.content_revision!=='string'||!part.content_revision||revision!==undefined&&part.content_revision!==revision||part.truncated===true||part.range_offset!==undefined&&Number(part.range_offset)!==offset||part.range_length!==undefined&&Number(part.range_length)!==length)throw new Error('Library file revision or byte length changed during ranged read')
+    const bytes=decodeBytes(part)
+    if(bytes.length!==length)throw new Error('Library range byte length changed')
+    revision=part.content_revision;chunks.push(bytes)
+  }
+  return{bytes:Buffer.concat(chunks,total),revision}
+}
 
 function rootsOf(index) {
   if (!Array.isArray(index?.sections)) throw new Error('Thread index response changed')
@@ -217,15 +239,9 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
     }
     throw new Error('Library file page limit reached')
   }
-  const readFileBytes=async(file)=>{
-    let value=await post(`${base}/files:open`,{path:file})
-    if(value?.type==='text'&&typeof value.content==='string'){const bytes=Buffer.from(value.content);if(value.size_bytes!==undefined&&Number(value.size_bytes)!==bytes.length)throw new Error('Library byte length changed');return {bytes,revision:value.content_revision}}
-    if(value?.type==='download'&&typeof value.data==='string'){const bytes=Buffer.from(value.data,'base64');if(value.size_bytes!==undefined&&Number(value.size_bytes)!==bytes.length)throw new Error('Library byte length changed');return {bytes,revision:value.content_revision}}
-    throw new Error('Library file cannot be read')
-  }
   const libraryIndex=await attempt('library','project files index',listFiles,null)
   const fileRevisions=new Map()
-  for(const entry of libraryIndex??[]){if(entry.is_directory===true)continue;const name=entry.path;if(!safePath(name)){miss('library','library path is invalid');continue}const value=await attempt('library',`file ${name}`,()=>readFileBytes(name),null);if(value){if(entry.size_bytes!==undefined&&Number(entry.size_bytes)!==value.bytes.length){miss('library',`file ${name} size changed`);continue}fileRevisions.set(name,value.revision);capture.libraryFiles.push({id:`file-${hash(name)}`,name:path.posix.basename(name),originalPath:name,bytes:value.bytes})}}
+  for(const entry of libraryIndex??[]){if(entry.is_directory===true)continue;const name=entry.path;if(!safePath(name)){miss('library','library path is invalid');continue}const value=await attempt('library',`file ${name}`,()=>readProjectFileBytes(client,projectId,name),null);if(value){if(entry.size_bytes!==undefined&&Number(entry.size_bytes)!==value.bytes.length){miss('library',`file ${name} size changed`);continue}fileRevisions.set(name,value.revision);capture.libraryFiles.push({id:`file-${hash(name)}`,name:path.posix.basename(name),originalPath:name,bytes:value.bytes})}}
   const artifacts=await attempt('library','artifact index',()=>request(`${base}/artifacts?limit=50`),null)
   const attachments=await attempt('library','attachment index',()=>request(`${base}/attachments?limit=100`),null)
   capture.channel.libraryIndex={files:libraryIndex??[],artifacts,attachments}

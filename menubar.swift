@@ -456,6 +456,8 @@ final class Model: ObservableObject {
             guard identity != activeIdentity else { return }
             flowPlan = nil
             projectPlan = nil
+            note = ""
+            lines = []
             refresh()
         }
     }
@@ -486,6 +488,7 @@ final class Model: ObservableObject {
             accounts = list
             settle()
             let identity = list.filter { $0.active == true }.map(\.id).joined(separator: ",")
+            if !activeIdentity.isEmpty && identity != activeIdentity { note = ""; lines = [] }
             activeIdentity = identity
             if !snapshot { refreshWorkflow() }
         }

@@ -99,9 +99,8 @@ export async function runProjectCommand(paths,args,emit,io={}){
       return verifyLocal(paths,batch.localPath,{source:batch.source})
     }
     if(args.cmd==='project-status'){
-      if(localPending){await verifyLocal(paths,completed.localPath,{source:completed.source});return emit({selected:completed.projects.length>0,count:completed.projects.length,current:active,source:completed.source,projects:projected(completed.projects),allProjects:true,phase:'restored',ready:true,canStage:false,canMove:true,preparedAt:completed.readyAt,localCount:completed.localCount,localPath:completed.localPath,note:'Projects are restored. Move and resume will finish the saved local conversations.'})}
+      if(localPending)return emit({selected:completed.projects.length>0,count:completed.projects.length,current:active,source:completed.source,projects:projected(completed.projects),allProjects:true,phase:'restored',ready:true,canStage:false,canMove:true,preparedAt:completed.readyAt,localCount:completed.localCount,localPath:completed.localPath,note:'Projects are restored. Move and resume will finish the saved local conversations.'})
       const ready=!!batch&&['ready','restoring'].includes(batch.phase)
-      if(ready)await verifySaved()
       const targetAllowed=!batch?.target||same(batch.target,active)
       const status={selected:true,count:batch?.projects.length??null,current:active,source:batch?.source??source,projects:batch?projected(batch.projects):[],allProjects:true,phase:ready?(same(active,source)?'ready':'destination'):'source',ready,canStage:same(active,source)&&!batch?.target,canMove:ready&&!same(active,source)&&targetAllowed,preparedAt:batch?.readyAt??null,localCount:batch?.localCount??null,localPath:batch?.localPath??null,note:ready?'Ready to switch accounts. The saved copy will be used for the move.':'Click Transplant while signed into the source account, then wait for Ready to switch accounts.'}
       if(batch?.target&&!targetAllowed)status.note='Sign into the recorded destination to finish this move.'

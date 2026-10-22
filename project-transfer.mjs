@@ -1,16 +1,26 @@
 import {createHash} from 'node:crypto'
 import {chmod,lstat,mkdir,readFile,readdir,rename,writeFile} from 'node:fs/promises'
 import path from 'node:path'
-import {collectProject} from './project-source.mjs'
+import {collectProject,readProjectFileBytes} from './project-source.mjs'
 import {writeCaptureBundle,verifyCaptureBundle,prepareProjectRestore,preflightRestoreUploads} from './project-workflow.mjs'
 
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
 const CHANNEL=/^chan_[A-Za-z0-9]+$/
 const SESSION=/^(?:cse|session)_[A-Za-z0-9]+$/
 const CONFIG=new Set(['system_prompt_addendum','channel_session_model','channel_session_effort_level','default_model','default_effort_level','default_source_urls','memory_enabled'])
+const CLEAR_STRING_CONFIG=new Set(['system_prompt_addendum','channel_session_model','channel_session_effort_level','default_model','default_effort_level'])
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex')
 const canonical=value=>JSON.stringify(value,(_,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item)
 const same=(a,b)=>canonical(a)===canonical(b)
+function configPatch(previous,desired) {
+  const patch={}
+  for(const [key,value] of Object.entries(desired)){
+    if(same(previous[key],value))continue
+    if(CLEAR_STRING_CONFIG.has(key)&&value===''||key==='default_source_urls'&&Array.isArray(value)&&value.length===0)patch[`clear_${key}`]=true
+    else patch[key]=value
+  }
+  return patch
+}
 const fail=message=>{throw new Error(message)}
 const wire=id=>id.replace(/^cse_/,'session_')
 const json=value=>Buffer.from(JSON.stringify(value,null,2)+'\n')
@@ -194,7 +204,68 @@ export async function verifyPreparedProjectTransfer(preparationDir){
 }
 const profile=channel=>Object.fromEntries(['id','name','topic','icon','color','visibility','created_by_account_id','created_at','disabled_at'].map(key=>[key,channel[key]??null]))
 const creationProfile=channel=>({...profile(channel),disabled_at:null})
-async function unusedDestination(client,id) {if(rootsOf(await client.projectRequest(`/v1/code/channels/${id}/threads?limit=100`)).length||(await messagePages(client,`/v1/code/channels/${id}/timeline`,{include_replies:'true',include_bound_session_rows:'true'})).length)fail('The destination project has new conversation work; restore cannot change it')}
+const coordinatorIds=channel=>[...new Set([channel.overview_session_id,channel.channel_session_id].filter(Boolean))]
+const messageBaseline=row=>Object.fromEntries(['id','channel_id','author_account_id','author_agent_id','author_session_id','body','server_notice','seq','thread_root_id','created_at'].map(key=>[key,row[key]??null]))
+function stableOnboardingBody(body) {
+  const blocked=()=>fail('The destination project has new conversation work; restore cannot change it')
+  let value;try{value=JSON.parse(body)}catch{blocked()}
+  const card=value?.card,keys=Array.isArray(card?.rows)?card.rows.map(item=>item?.key):null
+  const knownKeys=new Set(['plan_project','connect_tools','connect_code','capabilities','next_steps','build_check','next_feature'])
+  if(value?.kind!=='onboarding'||card?.variant!=='code'||card?.version!==1||!Array.isArray(keys)||keys.length===0||new Set(keys).size!==keys.length||keys.some(key=>!knownKeys.has(key))||Object.hasOwn(card,'title_only')&&typeof card.title_only!=='boolean'||Object.keys(card).some(key=>!['version','variant','rows','title_only'].includes(key)))blocked()
+  return{...value,card:{version:card.version,variant:card.variant}}
+}
+const comparableBaseline=rows=>rows.map(row=>row.server_notice===true?{...row,body:canonical(stableOnboardingBody(row.body))}:row)
+export async function assertDestinationConversation(client,channel,expected=undefined) {
+  const id=channel.id,roots=rootsOf(await client.projectRequest(`/v1/code/channels/${id}/threads?limit=100`))
+  const rows=await messagePages(client,`/v1/code/channels/${id}/timeline`,{include_replies:'true',include_bound_session_rows:'true'})
+  const blocked=()=>fail('The destination project has new conversation work; restore cannot change it')
+  if(roots.length)blocked()
+  let notices=0,starters=0
+  const sessions=new Set(coordinatorIds(channel).map(wire))
+  for(const row of rows){
+    if(!/^cmsg_[A-Za-z0-9]+$/.test(row.id??'')||row.channel_id!==id||row.author_account_id||!/^cagt_[A-Za-z0-9]+$/.test(channel.agent_id??'')||row.author_agent_id!==channel.agent_id||!sessions.has(wire(row.author_session_id??''))||String(row.seq)!=='0'||row.thread_root_id!==row.id||row.has_thread!==false||Number(row.reply_count)!==0||['attachments','attached_outputs','bound_sessions'].some(key=>!Array.isArray(row[key])||row[key].length))blocked()
+    if(row.server_notice===true){
+      stableOnboardingBody(row.body)
+      notices++
+    }else if(row.body===`Pick one of the suggestions to get going, or tell me what ${channel.name} is for.`)starters++
+    else blocked()
+  }
+  if(notices>1||starters>1||starters&&!notices)blocked()
+  const baseline=rows.map(messageBaseline).sort((a,b)=>a.id.localeCompare(b.id))
+  if(expected!==undefined&&(!Array.isArray(expected)||!same(comparableBaseline(baseline),comparableBaseline(expected))))blocked()
+  return baseline
+}
+async function waitForDestinationIdle(client,channel) {
+  const ids=coordinatorIds(channel),until=Date.now()+20_000
+  if(ids.length&&typeof client.session!=='function')fail('The destination coordinator state could not be checked')
+  for(;;){
+    let busy=false,unknown=false
+    for(const id of ids){
+      const value=await client.session(id),session=value?.session??value
+      if(wire(session?.id??'')!==wire(id))fail('The destination coordinator identity changed')
+      const status=normalize(session.status??session.lifecycle_status),worker=normalize(session.worker_status)
+      if(worker==='running'||worker==='pending')busy=true
+      else if(!(['paused','archived','failed'].includes(status)||status==='active'&&['idle','requires_action'].includes(worker)))unknown=true
+    }
+    if(!busy&&!unknown)return
+    if(Date.now()>=until)fail(unknown?'The destination coordinator state is unknown. Keep the project paused and retry Move and resume.':'The destination coordinator is still stopping. Keep the project paused and retry Move and resume.')
+    await new Promise(resolve=>setTimeout(resolve,250))
+  }
+}
+async function bootstrapMemory(client,channel) {
+  const memories=await memoryIndex(client,channel.id)
+  if(!memories.length)return null
+  const entry=memories[0],sessions=new Set(coordinatorIds(channel).map(wire))
+  if(memories.length!==1||entry.path!=='/MEMORY.md'||entry.updated_by?.type!=='session_actor'||!sessions.has(wire(entry.updated_by?.session_id??''))||typeof entry.id!=='string'||!entry.id||!/^[a-f0-9]{64}$/.test(entry.content_sha256??''))fail('The destination contains memory outside this project transfer')
+  const value=await client.projectRequest(`/v1/code/memory/channel/${channel.id}/memories/${encodeURIComponent(entry.id)}`)
+  if(typeof value?.content!=='string'||sha(Buffer.from(value.content))!==entry.content_sha256||value.content_sha256!==entry.content_sha256)fail('The default destination memory changed')
+  return{id:entry.id,path:entry.path,content_sha256:entry.content_sha256,updatedBySession:wire(entry.updated_by.session_id)}
+}
+async function checkBootstrapMemory(client,id,entry,expected) {
+  if(entry.id!==expected.id||entry.path!==expected.path||entry.content_sha256!==expected.content_sha256||entry.updated_by?.type!=='session_actor'||wire(entry.updated_by?.session_id??'')!==expected.updatedBySession)fail('The default destination memory changed')
+  const value=await client.projectRequest(`/v1/code/memory/channel/${id}/memories/${encodeURIComponent(entry.id)}`)
+  if(typeof value?.content!=='string'||value.content_sha256!==expected.content_sha256||sha(Buffer.from(value.content))!==expected.content_sha256)fail('The default destination memory changed')
+}
 async function libraryIndex(client,id) {
   const out=[],seen=new Set();let cursor
   for(let page=0;page<500;page++){
@@ -226,12 +297,7 @@ async function memoryIndex(client,id) {
   return [...new Map(rows.map(row=>[row.id,row])).values()]
 }
 const targetPath=name=>name.replace(/^\//,'')
-function decode(value) {
-  if(value?.type==='text'&&typeof value.content==='string')return Buffer.from(value.content)
-  if(['download','content'].includes(value?.type)&&typeof value.data==='string'){const bytes=Buffer.from(value.data,'base64');if(bytes.toString('base64')!==value.data)fail('Destination file encoding changed');return bytes}
-  fail('Destination file bytes are unavailable')
-}
-async function checkLibrary(client,id,upload) {const bytes=decode(await post(client,`/v1/code/channels/${id}/files:open`,{path:upload.path}));if(bytes.length!==upload.bytes||sha(bytes)!==upload.sha256)fail(`Destination file changed: ${upload.path}`)}
+async function checkLibrary(client,id,upload) {const {bytes}=await readProjectFileBytes(client,id,upload.path);if(bytes.length!==upload.bytes||sha(bytes)!==upload.sha256)fail(`Destination file changed: ${upload.path}`)}
 async function checkMemory(client,id,upload,entry) {const memory=await client.projectRequest(`/v1/code/memory/channel/${id}/memories/${encodeURIComponent(entry.id)}`);if(typeof memory?.content!=='string'||Buffer.byteLength(memory.content)!==upload.bytes||sha(Buffer.from(memory.content))!==upload.sha256||memory.content_sha256!==upload.sha256)fail(`Destination memory changed: ${upload.path}`)}
 
 // The caller holds the normal operation lock. The receipt binds retries to the
@@ -251,7 +317,7 @@ export async function restoreProjectTransfer(client,preparationDir,{report=()=>{
     await state(stageRoot,'restore.json',receipt)
     report('Creating a paused project in the destination account')
     const body={name:plan.project.name,visibility:'private',disabled:true}
-    for(const key of ['topic','icon','color'])if(plan.project[key]!==null&&plan.project[key]!==undefined)body[key]=plan.project[key]
+    for(const key of ['icon','color'])if(plan.project[key]!==null&&plan.project[key]!==undefined)body[key]=plan.project[key]
     const response=await write(client,'/v1/code/channels','POST',body),created=response?.channel
     if(!CHANNEL.test(created?.id??'')||created.id===transfer.source.projectId)fail('Project create returned no new destination ID; retry will not create a duplicate')
     receipt.destination.projectId=created.id;receipt.creationProfile=profile(created);receipt.status='created';await state(stageRoot,'restore.json',receipt)
@@ -261,7 +327,6 @@ export async function restoreProjectTransfer(client,preparationDir,{report=()=>{
     if(!receipt.creationProfile||ownerAccount(receipt.creationProfile.created_by_account_id)!==client.account.toLowerCase()||!Number.isFinite(Date.parse(receipt.creationProfile.created_at)))fail('The new project owner could not be verified')
     let current=channelOf(await client.projectRequest(`/v1/code/channels/${id}`),id)
     if(!same(creationProfile(current),creationProfile(receipt.creationProfile)))fail('The new destination project changed before restore')
-    await unusedDestination(client,id)
     if(!paused(current)){
       receipt.pausePending=true;await state(stageRoot,'restore.json',receipt)
       report('Pausing the new destination before restoring its data')
@@ -269,12 +334,22 @@ export async function restoreProjectTransfer(client,preparationDir,{report=()=>{
       current=await pausedChannel(client,id)
     }
     if(!same(creationProfile(current),creationProfile(receipt.creationProfile)))fail('The new destination project changed before restore')
+    await waitForDestinationIdle(client,current)
+    receipt.bootstrapMessages=await assertDestinationConversation(client,current)
+    receipt.bootstrapMemory=await bootstrapMemory(client,current)
     receipt.profile=profile(current);receipt.pausePending=false
     receipt.configSha256=sha(canonical((await client.projectRequest(`/v1/code/channels/${id}/config`))?.config??null))
     await state(stageRoot,'restore.json',receipt)
   }
+  const plannedTopic=typeof plan.project.topic==='string'&&plan.project.topic!==''?plan.project.topic:null
   const assertTarget=async()=>{
     const current=await pausedChannel(client,id,receipt.profile?.disabled_at)
+    if(receipt.metadataPending){
+      if(plannedTopic===null||!same(receipt.metadataPending,{...receipt.profile,topic:plannedTopic}))fail('The pending destination goal does not match this project transfer')
+      if(same(profile(current),receipt.metadataPending)){
+        receipt.profile=receipt.metadataPending;delete receipt.metadataPending;await state(stageRoot,'restore.json',receipt)
+      }else if(!same(profile(current),receipt.profile))fail('The destination project changed before its goal update completed')
+    }
     if(!receipt.profile||!same(profile(current),receipt.profile)||ownerAccount(current.created_by_account_id)!==client.account.toLowerCase())fail('The destination project changed or its owner is unverified')
     const response=await client.projectRequest(`/v1/code/channels/${id}/config`),configHash=sha(canonical(response?.config??null))
     if(configHash!==receipt.configSha256){
@@ -283,48 +358,108 @@ export async function restoreProjectTransfer(client,preparationDir,{report=()=>{
     }
     return current
   }
-  await assertTarget()
-  await unusedDestination(client,id)
-  const files=await libraryIndex(client,id),memories=await memoryIndex(client,id)
-  const fileMap=new Map(files.map(entry=>[targetPath(entry.path),entry])),memoryMap=new Map(memories.map(entry=>[entry.path,entry]))
+  // File uploads require an enabled channel. Only this journaled phase may
+  // change the saved pause state; retries finish the pause before other work.
+  const uploadTarget=async({checkConfig=true}={})=>{
+    const phase=receipt.fileUploadPhase
+    if(!phase||!['enabling','uploading','pausing'].includes(phase.state)||phase.pausedAt!==receipt.profile?.disabled_at||Object.keys(phase).some(key=>!['state','pausedAt'].includes(key)))fail('The destination file upload receipt changed')
+    const current=channelOf(await client.projectRequest(`/v1/code/channels/${id}`),id)
+    if(!same(creationProfile(current),creationProfile(receipt.profile))||ownerAccount(current.created_by_account_id)!==client.account.toLowerCase()||current.disabled_at!==null&&!paused(current)||paused(current)&&phase.state!=='pausing'&&current.disabled_at!==phase.pausedAt)fail('The destination project changed during file upload')
+    if(checkConfig&&sha(canonical((await client.projectRequest(`/v1/code/channels/${id}/config`))?.config??null))!==receipt.configSha256)fail('Destination project settings changed during file upload')
+    return current
+  }
+  const finishFileUploads=async()=>{
+    let current=await uploadTarget({checkConfig:false})
+    receipt.fileUploadPhase.state='pausing';await state(stageRoot,'restore.json',receipt)
+    if(!paused(current)){
+      await write(client,`/v1/code/channels/${id}`,'PATCH',{disabled:true})
+      current=await uploadTarget({checkConfig:false})
+    }
+    if(!paused(current))fail('The destination project did not pause after file upload')
+    await waitForDestinationIdle(client,current)
+    receipt.profile=profile(current);delete receipt.fileUploadPhase;await state(stageRoot,'restore.json',receipt)
+  }
+  if(receipt.fileUploadPhase)await finishFileUploads()
+  let current=await assertTarget()
+  await assertDestinationConversation(client,current,receipt.bootstrapMessages??[])
   const plannedFiles=new Set(plan.libraryUploads.map(upload=>targetPath(upload.path))),plannedMemories=new Set(plan.memoryUploads.map(upload=>upload.path))
-  if(files.some(entry=>!plannedFiles.has(targetPath(entry.path)))||memories.some(entry=>!plannedMemories.has(entry.path)))fail('The destination contains data outside this project transfer')
-  for(const upload of plan.libraryUploads)if(fileMap.has(targetPath(upload.path)))await checkLibrary(client,id,upload)
-  for(const upload of plan.memoryUploads)if(memoryMap.has(upload.path))await checkMemory(client,id,upload,memoryMap.get(upload.path))
+  const checkExistingData=async()=>{
+    const files=await libraryIndex(client,id),memories=await memoryIndex(client,id)
+    const fileMap=new Map(files.map(entry=>[targetPath(entry.path),entry])),memoryMap=new Map(memories.map(entry=>[entry.path,entry]))
+    if(files.some(entry=>!plannedFiles.has(targetPath(entry.path)))||memories.some(entry=>!plannedMemories.has(entry.path)))fail('The destination contains data outside this project transfer')
+    for(const upload of plan.libraryUploads)if(fileMap.has(targetPath(upload.path)))await checkLibrary(client,id,upload)
+    for(const upload of plan.memoryUploads)if(memoryMap.has(upload.path)){
+      const entry=memoryMap.get(upload.path)
+      if(receipt.bootstrapMemory?.id===entry.id&&receipt.bootstrapMemory.path===upload.path&&entry.content_sha256===receipt.bootstrapMemory.content_sha256)await checkBootstrapMemory(client,id,entry,receipt.bootstrapMemory)
+      else await checkMemory(client,id,upload,entry)
+    }
+    return{fileMap,memoryMap}
+  }
+  let {fileMap,memoryMap}=await checkExistingData()
+  const pendingFiles=plan.libraryUploads.filter(upload=>!fileMap.has(targetPath(upload.path)))
+  if(pendingFiles.length){
+    await assertDestinationConversation(client,await assertTarget(),receipt.bootstrapMessages??[])
+    receipt.fileUploadPhase={state:'enabling',pausedAt:receipt.profile.disabled_at};await state(stageRoot,'restore.json',receipt)
+    try{
+      report('Enabling file uploads for the new destination project')
+      await write(client,`/v1/code/channels/${id}`,'PATCH',{disabled:false})
+      receipt.fileUploadPhase.state='uploading';await state(stageRoot,'restore.json',receipt)
+      for(const upload of pendingFiles){
+        const active=await uploadTarget()
+        if(active.disabled_at!==null)fail('The destination project is paused during file upload')
+        await assertDestinationConversation(client,active,receipt.bootstrapMessages??[]);report(`Restoring file ${upload.path}`)
+        const bytes=contents.get(upload.sourcePath)
+        if(bytes.length>16*1024*1024){if(typeof client.projectUpload!=='function')fail('The Claude client cannot upload this large project file');await client.projectUpload(id,upload.path,bytes)}
+        else{
+          const response=await write(client,`/v1/code/channels/${id}/files:write`,'POST',{files:[{path:upload.path,overwrite:false,content:bytes.toString('base64')}]})
+          const result=response?.results?.find(entry=>targetPath(entry.path??'')===targetPath(upload.path))
+          if(!result?.entry||result.error_reason)fail(`Destination file write failed: ${upload.path}`)
+        }
+        await checkLibrary(client,id,upload);receipt.applied.push({kind:'library',path:upload.path,sha256:upload.sha256});await state(stageRoot,'restore.json',receipt)
+      }
+    }finally{await finishFileUploads()}
+    current=await assertTarget()
+    await assertDestinationConversation(client,current,receipt.bootstrapMessages??[])
+    ;({fileMap,memoryMap}=await checkExistingData())
+  }
+  if(plannedTopic!==null&&receipt.profile.topic!==plannedTopic){
+    await assertDestinationConversation(client,current,receipt.bootstrapMessages??[])
+    receipt.metadataPending={...receipt.profile,topic:plannedTopic};await state(stageRoot,'restore.json',receipt)
+    report('Restoring the project goal after pausing its new coordinator')
+    await write(client,`/v1/code/channels/${id}`,'PATCH',{topic:plannedTopic})
+    current=await assertTarget()
+    if(receipt.profile.topic!==plannedTopic)fail('The destination project goal failed verification')
+  }
   if(!receipt.configApplied){
     await assertTarget()
     const previous=(await client.projectRequest(`/v1/code/channels/${id}/config`))?.config
     if(!previous||sha(canonical(previous))!==receipt.configSha256)fail('Destination project settings changed')
-    receipt.configPending=true;receipt.pendingConfigSha256=sha(canonical({...previous,...plan.project.config}));await state(stageRoot,'restore.json',receipt)
-    if(Object.keys(plan.project.config).length)await write(client,`/v1/code/channels/${id}/config`,'PATCH',plan.project.config)
+    const patch=configPatch(previous,plan.project.config)
+    if(Object.keys(patch).length){
+      receipt.configPending=true;receipt.pendingConfigSha256=sha(canonical({...previous,...plan.project.config}));await state(stageRoot,'restore.json',receipt)
+      await write(client,`/v1/code/channels/${id}/config`,'PATCH',patch)
+    }
     const config=(await client.projectRequest(`/v1/code/channels/${id}/config`))?.config
     if(!config||Object.entries(plan.project.config).some(([key,value])=>!same(config[key],value)))fail('Destination project settings failed verification')
     receipt.configSha256=sha(canonical(config));receipt.configApplied=true;receipt.configPending=false;delete receipt.pendingConfigSha256;receipt.status='restoring';await state(stageRoot,'restore.json',receipt)
   }
   for(const upload of plan.memoryUploads){
-    if(memoryMap.has(upload.path))continue
-    await assertTarget();report(`Restoring memory ${upload.path}`)
+    const existing=memoryMap.get(upload.path),replace=existing&&receipt.bootstrapMemory?.id===existing.id&&receipt.bootstrapMemory.path===upload.path&&existing.content_sha256===receipt.bootstrapMemory.content_sha256
+    if(existing&&!replace)continue
+    await assertDestinationConversation(client,await assertTarget(),receipt.bootstrapMessages??[]);report(`Restoring memory ${upload.path}`)
     const bytes=contents.get(upload.sourcePath),content=bytes.toString('utf8')
     if(!Buffer.from(content).equals(bytes))fail('Project memory is not valid UTF-8')
-    await write(client,`/v1/code/memory/channel/${id}/memories`,'POST',{path:upload.path,content,precondition:{type:'not_exists'}})
+    if(replace){
+      const current=(await memoryIndex(client,id)).find(entry=>entry.id===existing.id)
+      if(!current)fail('The default destination memory is absent')
+      await checkBootstrapMemory(client,id,current,receipt.bootstrapMemory)
+      await write(client,`/v1/code/memory/channel/${id}/memories/${encodeURIComponent(existing.id)}`,'POST',{content,precondition:{type:'content_sha256',content_sha256:receipt.bootstrapMemory.content_sha256}})
+    }else await write(client,`/v1/code/memory/channel/${id}/memories`,'POST',{path:upload.path,content,precondition:{type:'not_exists'}})
     const entry=(await memoryIndex(client,id)).find(item=>item.path===upload.path)
     if(!entry)fail('Restored project memory is absent')
     await checkMemory(client,id,upload,entry);receipt.applied.push({kind:'memory',path:upload.path,sha256:upload.sha256});await state(stageRoot,'restore.json',receipt)
   }
-  for(const upload of plan.libraryUploads){
-    if(fileMap.has(targetPath(upload.path)))continue
-    await assertTarget();report(`Restoring file ${upload.path}`)
-    const bytes=contents.get(upload.sourcePath)
-    if(bytes.length>16*1024*1024){if(typeof client.projectUpload!=='function')fail('The Claude client cannot upload this large project file');await client.projectUpload(id,upload.path,bytes)}
-    else{
-      const response=await write(client,`/v1/code/channels/${id}/files:write`,'POST',{files:[{path:upload.path,overwrite:false,content:bytes.toString('base64')}]})
-      const result=response?.results?.find(entry=>targetPath(entry.path??'')===targetPath(upload.path))
-      if(!result?.entry||result.error_reason)fail(`Destination file write failed: ${upload.path}`)
-    }
-    await checkLibrary(client,id,upload);receipt.applied.push({kind:'library',path:upload.path,sha256:upload.sha256});await state(stageRoot,'restore.json',receipt)
-  }
-  await assertTarget()
-  await unusedDestination(client,id)
+  await assertDestinationConversation(client,await assertTarget(),receipt.bootstrapMessages??[])
   const finalFiles=await libraryIndex(client,id),finalMemories=await memoryIndex(client,id)
   if(finalFiles.length!==plan.libraryUploads.length||finalMemories.length!==plan.memoryUploads.length)fail('Destination file inventory changed during restore')
   for(const upload of plan.libraryUploads)await checkLibrary(client,id,upload)

@@ -1,6 +1,7 @@
 import {createHash,randomUUID} from 'node:crypto'
 import {lstat,readFile,rename,writeFile} from 'node:fs/promises'
 import path from 'node:path'
+import {assertDestinationConversation} from './project-transfer.mjs'
 
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
 const CHANNEL=/^chan_[A-Za-z0-9]+$/
@@ -98,7 +99,7 @@ export async function resumeProjectTransfer(client,stageRoot,{report=()=>{}}={})
   if(receipt){const row=accepted(rows,receipt,client.account.toLowerCase());if(row)return finish(row);if(receipt.status==='complete')fail('The accepted resume message is no longer in the timeline; no second start was sent')}
   if(!same(profile(channel),profile(restore.profile)))fail('The restored destination project changed before resume')
   if(!receipt&&(!paused(channel)||channel.disabled_at!==restore.profile.disabled_at))fail('The restored project is not paused at its verified state')
-  if(rows.length)fail('The destination has other conversation work; no project start was sent')
+  await assertDestinationConversation(client,channel,restore.bootstrapMessages??[])
   const config=(await client.projectRequest(`${endpoint}/config`))?.config
   if(!config||sha(config)!==restore.configSha256)fail('The restored destination settings changed before resume')
   if(!/^cagt_[A-Za-z0-9]+$/.test(config.agent_id??''))fail('The destination has no verified project agent. Open it in Claude and check its setup before resume.')

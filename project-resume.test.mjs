@@ -24,12 +24,13 @@ async function fixture(t){
   const save=async(name,value)=>writeFile(path.join(dir,name),JSON.stringify(value),{mode:0o600})
   const receipt=async()=>JSON.parse(await readFile(path.join(dir,'resume.json'),'utf8'))
   await save('transfer.json',transfer);await save('restore.json',restore)
-  const state={channel,config,rows:[],calls:[],sendMode:'normal',failTimelineAfterSend:false,pageSize:0}
+  const state={channel,config,rows:[],roots:[],calls:[],sendMode:'normal',failTimelineAfterSend:false,pageSize:0}
   const client={account:TARGET,org:TARGET_ORG,
     async projectRequest(endpoint){
       state.calls.push({method:'GET',endpoint})
       if(endpoint==='/v1/code/channels/chan_target')return{channel:clone(channel)}
       if(endpoint.endsWith('/config'))return{config:clone(config)}
+      if(endpoint.includes('/threads?'))return{sections:state.roots.length?[{status:'idle',count:state.roots.length,data:clone(state.roots)}]:[],truncated:false}
       if(endpoint.includes('/timeline?')){
         if(state.failTimelineAfterSend&&state.calls.some(call=>call.method==='POST')){state.failTimelineAfterSend=false;throw Error('Timeline read failed')}
         const query=new URL(endpoint,'https://claude.ai').searchParams,index=Number(query.get('cursor')??0),size=state.pageSize||200
@@ -55,6 +56,33 @@ async function fixture(t){
 }
 const posts=f=>f.state.calls.filter(call=>call.method==='POST')
 const writes=f=>f.state.calls.filter(call=>call.method!=='GET')
+
+async function welcome(f){
+  Object.assign(f.state.channel,{agent_id:'cagt_destination',channel_session_id:'cse_coordinator',overview_session_id:'cse_coordinator'})
+  const common={channel_id:'chan_target',author_agent_id:'cagt_destination',author_session_id:'cse_coordinator',seq:'0',has_thread:false,reply_count:'0',attachments:[],attached_outputs:[],bound_sessions:[],created_at:NOW}
+  f.state.rows=[{...common,id:'cmsg_onboarding',thread_root_id:'cmsg_onboarding',server_notice:true,body:JSON.stringify({kind:'onboarding',card:{version:1,variant:'code',title_only:true,rows:['plan_project','connect_tools','connect_code','capabilities'].map(key=>({key}))}})},{...common,id:'cmsg_starter',thread_root_id:'cmsg_starter',body:'Pick one of the suggestions to get going, or tell me what Source is for.'}]
+  f.restore.bootstrapMessages=f.state.rows.map(row=>({id:row.id,channel_id:row.channel_id,author_account_id:null,author_agent_id:row.author_agent_id,author_session_id:row.author_session_id,body:row.body,server_notice:row.server_notice??null,seq:row.seq,thread_root_id:row.thread_root_id,created_at:row.created_at}))
+  await f.save('restore.json',f.restore)
+}
+
+test('resume permits only the exact automatic welcome saved by restore',async t=>{
+  const f=await fixture(t);await welcome(f)
+  assert.equal((await f.resume()).accepted,true)
+  await f.resume()
+  assert.equal(posts(f).length,1)
+})
+
+test('changed welcome, human work, new threads, or an unrecorded welcome stop resume',async t=>{
+  for(const change of ['welcome','user','thread','receipt']){
+    const f=await fixture(t);await welcome(f)
+    if(change==='welcome')f.state.rows[1].body='Work has started'
+    if(change==='user')f.state.rows.push({id:'cmsg_user',author_account_id:TARGET,body:'New user work'})
+    if(change==='thread')f.state.roots.push({id:'cmsg_userThread',bound_sessions:[]})
+    if(change==='receipt'){delete f.restore.bootstrapMessages;await f.save('restore.json',f.restore)}
+    await assert.rejects(f.resume(),/new conversation|changed/)
+    assert.equal(writes(f).length,0,change)
+  }
+})
 
 test('resume saves one request ID before unpause and verifies the exact accepted user message',async t=>{
   const f=await fixture(t),result=await f.resume(),saved=await f.receipt()
@@ -103,7 +131,7 @@ test('cross-account, unverified restore, changed owner or settings, and absent d
     if(change==='active')f.state.channel.disabled_at=null
     if(change==='new-work')f.state.rows.push({id:'cmsg_other',body:'Unrelated work'})
     if(change==='mode')await chmod(path.join(f.dir,'restore.json'),0o644)
-    await assert.rejects(f.resume(),/verified|match|identity|owner|changed|agent|paused|other conversation|private/)
+    await assert.rejects(f.resume(),/verified|match|identity|owner|changed|agent|paused|other conversation|new conversation|private/)
     assert.equal(writes(f).length,0,change)
   }
 })

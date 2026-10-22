@@ -1,6 +1,6 @@
 {
   "name": "@miguelpieras/claude-transplant",
-  "version": "4.1.3-resume.13",
+  "version": "4.1.3-resume.14",
   "description": "Move Claude Code projects and local conversations to a verified Personal plan, then resume interrupted work. Unofficial macOS beta.",
   "type": "module",
   "bin": {

@@ -1981,6 +1981,52 @@ test('project capture transport is read-only and checks the response organizatio
   await assert.rejects(client.projectRequest('/v1/code/channels/chan_fixture/config'),/organization changed/)
 })
 
+test('project memory updates require an exact content precondition',async(t)=>{
+  const h=await home(),requested=[]
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    const endpoint=new URL(url).pathname
+    if(endpoint==='/api/account')return Response.json({uuid:h.acct.P})
+    if(endpoint==='/api/organizations')return Response.json([{uuid:h.org.P}])
+    requested.push({endpoint,method:options.method,body:JSON.parse(options.body)})
+    return Response.json({content:'restored'},{headers:{'anthropic-organization-id':h.org.P}})
+  })
+  const client=await cloudClient(h.paths,{account:h.acct.P,org:h.org.P,label:'Destination'},{active:{state:'unknown'},cookies:new Map([['sessionKey','fixture']]),userAgent:'fixture'})
+  const endpoint='/v1/code/memory/channel/chan_fixture/memories/mem_bootstrap',valid={content:'restored',precondition:{type:'content_sha256',content_sha256:'a'.repeat(64)}}
+  for(const body of [{content:'restored'},{...valid,precondition:{type:'not_exists'}},{...valid,precondition:{type:'content_sha256',content_sha256:'invalid'}},{...valid,path:'/other.md'}])assert.throws(()=>client.projectWrite(endpoint,{method:'POST',body:JSON.stringify(body)}),/exact existing content hash/)
+  assert.throws(()=>client.projectWrite(endpoint,{method:'DELETE',body:JSON.stringify(valid)}),/Invalid project transfer write/)
+  assert.equal(requested.length,0)
+  await client.projectWrite(endpoint,{method:'POST',body:JSON.stringify(valid)})
+  assert.deepEqual(requested,[{endpoint,method:'POST',body:valid}])
+})
+
+test('project upload sends JSON metadata as a multipart file and preserves exact bytes',async(t)=>{
+  const h=await home(),bytes=Buffer.from([0,1,255]),requested=[]
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    const endpoint=new URL(url).pathname,headers={'anthropic-organization-id':h.org.P}
+    if(endpoint==='/api/account')return Response.json({uuid:h.acct.P})
+    if(endpoint==='/api/organizations')return Response.json([{uuid:h.org.P}])
+    requested.push(endpoint)
+    if(endpoint.endsWith('/files:beginUpload')){
+      assert.deepEqual(JSON.parse(options.body),{size_bytes:bytes.length})
+      return Response.json({filesystem_id:'fs_fixture',filestore_jwt:'fixture-grant',upload_path:'uploads/file.bin'},{headers})
+    }
+    if(endpoint==='/v1/filestore/fs/createFile'){
+      assert.equal(options.headers.authorization,'Bearer fixture-grant')
+      const params=options.body.get('params')
+      assert.equal(params.type,'application/json')
+      assert.deepEqual(JSON.parse(await params.text()),{filesystem_id:'fs_fixture',path:'uploads/file.bin',media_type:'application/octet-stream',overwrite_existing:true})
+      assert.deepEqual(Buffer.from(await options.body.get('file').arrayBuffer()),bytes)
+      return Response.json({})
+    }
+    assert.equal(endpoint,'/v1/code/channels/chan_fixture/files:write')
+    assert.deepEqual(JSON.parse(options.body),{files:[{path:'/result.bin',staged_upload_path:'uploads/file.bin',overwrite:false}]})
+    return Response.json({results:[{path:'/result.bin',entry:{path:'/result.bin'}}]},{headers})
+  })
+  const client=await cloudClient(h.paths,{account:h.acct.P,org:h.org.P,label:'Destination'},{active:{state:'unknown'},cookies:new Map([['sessionKey','fixture']]),userAgent:'fixture'})
+  await client.projectUpload('chan_fixture','/result.bin',bytes)
+  assert.equal(requested.length,3)
+})
+
 test('project artifact reads return safe metadata rather than viewer tokens or runtime files',async(t)=>{
   const h=await home(),artifactId=id(999)
   t.mock.method(globalThis,'fetch',async(url,options)=>{
@@ -6921,8 +6967,10 @@ struct StateChecks {
         precondition(requests.isEmpty && !checking.flowChecking && checking.flowPlan?.to.account == "source")
         checking.pollAccount()
         let changedAccount = requests.removeFirst()
+        checking.note = "Ready to switch accounts"
         changedAccount.1(#"{"account":"target","org":"personal"}"#); changedAccount.2(0, "")
         precondition(checking.flowChecking && checking.flowPlan == nil && checking.projectPlan == nil)
+        precondition(checking.note.isEmpty)
         precondition(requests.count == 1 && requests[0].0 == ["accounts", "--json"])
         requests.removeFirst().2(1, "fixture changed account read failed")
         precondition(requests.isEmpty && !checking.flowChecking)

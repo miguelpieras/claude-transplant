@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto'
 import {mkdtemp, mkdir, realpath, rm, writeFile} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import {collectProject,loadArtifactExports} from './project-source.mjs'
+import {collectProject,loadArtifactExports,readProjectFileBytes} from './project-source.mjs'
 import {writeCaptureBundle, verifyCaptureBundle} from './project-workflow.mjs'
 
 const ACCOUNT='11111111-1111-4111-8111-111111111111'
@@ -41,6 +41,60 @@ function fixture(overrides={}) {
   }
   return {client,calls,index,root,channel,memory}
 }
+
+test('large project files are read in exact byte ranges with one content revision',async()=>{
+  const bytes=Buffer.alloc(16*1024*1024+7,5),requests=[]
+  const client={async projectRequest(endpoint,options){
+    assert.equal(endpoint,`/v1/code/channels/${PROJECT}/files:open`)
+    const body=JSON.parse(options.body);requests.push(body)
+    if(body.range_offset===undefined)return{type:'unsupported',reason:'too_large',size_bytes:String(bytes.length)}
+    return{type:'download',size_bytes:String(bytes.length),content_revision:'revision1',data:bytes.subarray(body.range_offset,body.range_offset+body.range_length).toString('base64')}
+  }}
+  const value=await readProjectFileBytes(client,PROJECT,'/large.bin')
+  assert.ok(value.bytes.equals(bytes));assert.equal(value.revision,'revision1')
+  assert.deepEqual(requests,[{path:'/large.bin'},{path:'/large.bin',range_offset:0,range_length:16*1024*1024},{path:'/large.bin',range_offset:16*1024*1024,range_length:7}])
+})
+
+test('ranged reads reject changed size or revision, partial chunks, bad encoding, and invalid bounds',async()=>{
+  for(const change of ['size','revision','short','encoding','offset','length','truncated','missing-revision','bound']){
+    let ranges=0
+    const client={async projectRequest(endpoint,options){
+      const body=JSON.parse(options.body)
+      if(body.range_offset===undefined)return{type:'unsupported',reason:'too_large',size_bytes:change==='bound'?'480000001':'2'}
+      ranges++
+      const value={type:'download',size_bytes:'2',content_revision:'revision1',data:Buffer.from('ok').toString('base64')}
+      if(change==='size')value.size_bytes='3'
+      if(change==='revision'||change==='missing-revision')delete value.content_revision
+      if(change==='short')value.data=Buffer.from('o').toString('base64')
+      if(change==='encoding')value.data='b2t='
+      if(change==='offset')value.range_offset=1
+      if(change==='length')value.range_length=1
+      if(change==='truncated')value.truncated=true
+      return value
+    }}
+    await assert.rejects(readProjectFileBytes(client,PROJECT,'/large.bin'),/Library|Output bytes/,change)
+    assert.equal(ranges,change==='bound'?0:1)
+  }
+  const bytes=Buffer.alloc(16*1024*1024+1),client={async projectRequest(endpoint,options){
+    const body=JSON.parse(options.body)
+    return body.range_offset===undefined?{type:'unsupported',reason:'too_large',size_bytes:bytes.length}:{type:'download',size_bytes:bytes.length,content_revision:body.range_offset===0?'first':'changed',data:bytes.subarray(body.range_offset,body.range_offset+body.range_length).toString('base64')}
+  }}
+  await assert.rejects(readProjectFileBytes(client,PROJECT,'/large.bin'),/revision or byte length changed/)
+})
+
+test('project capture uses range bytes and checks their final revision',async()=>{
+  const bytes=Buffer.from('range bytes'),{client,calls}=fixture({request(u,options){
+    if(u.pathname.endsWith('/files:list'))return{entries:[{path:'/result.txt',size_bytes:bytes.length}]}
+    if(u.pathname.endsWith('/files:open')){
+      const body=JSON.parse(options.body)
+      if(body.range_offset===undefined)return{type:'unsupported',reason:'too_large',size_bytes:String(bytes.length)}
+      return{type:'download',size_bytes:String(bytes.length),content_revision:'revision1',data:bytes.subarray(body.range_offset,body.range_offset+body.range_length).toString('base64')}
+    }
+  }})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.ok(capture.complete.library);assert.ok(capture.libraryFiles[0].bytes.equals(bytes))
+  assert.ok(calls.some(call=>call.endpoint.endsWith('/files:open')&&JSON.parse(call.options.body).range_length===1))
+})
 
 test('collects source history, bytes and exact session IDs in a valid complete bundle',async()=>{
   const {client,calls}=fixture(),capture=await collectProject(client,{},PROJECT)

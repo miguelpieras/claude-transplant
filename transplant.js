@@ -947,12 +947,14 @@ export async function cloudClient(paths, expected = null, io = {}) {
     projectWrite: (endpoint, options = {}) => {
       const method = options.method
       const permitted = method === 'POST' && /^\/v1\/code\/(?:channels|channels\/chan_[A-Za-z0-9]+\/files:write|memory\/channel\/chan_[A-Za-z0-9]+\/memories)$/.test(endpoint)
+        || method === 'POST' && /^\/v1\/code\/memory\/channel\/chan_[A-Za-z0-9]+\/memories\/mem_[A-Za-z0-9]+$/.test(endpoint)
         || method === 'POST' && /^\/v1\/code\/channels\/chan_[A-Za-z0-9]+\/messages$/.test(endpoint)
         || method === 'PATCH' && /^\/v1\/code\/channels\/chan_[A-Za-z0-9]+(?:\/config)?$/.test(endpoint)
       if (!permitted) throw new Error('Invalid project transfer write')
       const value = JSON.parse(options.body ?? 'null')
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Project transfer requires a JSON object')
       if (endpoint.endsWith('/memories') && value.precondition?.type !== 'not_exists') throw new Error('Project memory transfer requires a new path')
+      if (/\/memories\/mem_[A-Za-z0-9]+$/.test(endpoint) && (typeof value.content !== 'string' || value.precondition?.type !== 'content_sha256' || !/^[a-f0-9]{64}$/.test(value.precondition.content_sha256 ?? '') || Object.keys(value).some(key => !['content','precondition'].includes(key)))) throw new Error('Project memory update requires the exact existing content hash')
       if (endpoint.endsWith('/files:write') && (!Array.isArray(value.files) || !value.files.length || value.files.some(file => file.overwrite !== false))) throw new Error('Project file transfer cannot overwrite files')
       if (endpoint.endsWith('/messages') && (typeof value.body !== 'string' || !value.body.trim() || !UUID.test(value.client_message_id ?? '') || Object.keys(value).some(key=>!['body','client_message_id'].includes(key)))) throw new Error('Project continuation requires a stable message ID and plain text')
       return request(endpoint, {method,body:JSON.stringify(value),headers:{'content-type':'application/json','anthropic-beta':'ccr-byoc-2025-07-29','anthropic-client-feature':'ccr'}})
@@ -965,7 +967,7 @@ export async function cloudClient(paths, expected = null, io = {}) {
       const grant = await request(`${base}/files:beginUpload`,{method:'POST',headers,body:JSON.stringify({size_bytes:bytes.length})})
       if (!grant || typeof grant.filesystem_id !== 'string' || typeof grant.filestore_jwt !== 'string' || typeof grant.upload_path !== 'string') throw new Error('Project upload grant is incomplete')
       const body = new FormData()
-      body.set('params',JSON.stringify({filesystem_id:grant.filesystem_id,path:grant.upload_path,media_type:'application/octet-stream',overwrite_existing:true}))
+      body.set('params',new Blob([JSON.stringify({filesystem_id:grant.filesystem_id,path:grant.upload_path,media_type:'application/octet-stream',overwrite_existing:true})],{type:'application/json'}))
       body.set('file',new Blob([bytes],{type:'application/octet-stream'}),path.posix.basename(targetPath))
       // The short-lived upload grant stays in memory and is sent only to Claude.
       await request('/v1/filestore/fs/createFile',{method:'POST',headers:{authorization:`Bearer ${grant.filestore_jwt}`},body,signal:AbortSignal.timeout(300_000)})

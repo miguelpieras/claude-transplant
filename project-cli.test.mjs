@@ -111,6 +111,8 @@ test('restoring after sign-out uses saved bytes without any source account acces
 test('status after the account switch reads only the saved local receipt',async t=>{
   const f=await fixture(t);await f.prepare();f.setActive(B)
   f.io.clientFactory=async()=>assert.fail('Ready status must not call any cloud account')
+  f.io.verifyLocal=async()=>assert.fail('Status must not hash saved local files')
+  f.io.verifyStage=async()=>assert.fail('Status must not hash saved project files')
   await f.run('project-status')
   const status=f.events.at(-1)
   assert.equal(status.phase,'destination');assert.equal(status.ready,true);assert.equal(status.canMove,true)
@@ -122,6 +124,8 @@ test('a ready source status does not refresh cloud data in the background',async
   const f=await fixture(t);await f.prepare()
   f.io.clientFactory=async()=>assert.fail('Ready status uses its saved receipt')
   f.io.locked=async()=>assert.fail('Status must not hold the move lock')
+  f.io.verifyLocal=async()=>assert.fail('Status must not hash saved local files')
+  f.io.verifyStage=async()=>assert.fail('Status must not hash saved project files')
   await f.run('project-status')
   assert.equal(f.events.at(-1).phase,'ready')
   assert.equal(f.events.at(-1).canStage,true)
@@ -175,11 +179,19 @@ test('changed saved local or project bytes block all destination writes',async t
   }
 })
 
-test('ready status rejects damaged saved bytes without opening a cloud client',async t=>{
+test('ready status reads the receipt without hashing data and move rejects damaged bytes before writes',async t=>{
   const f=await fixture(t);await f.prepare();const batch=await f.batch()
   await json(path.join(batch.localPath,'local.json'),{source:A,count:3,body:'Changed'})
-  f.setActive(B);f.io.clientFactory=async()=>assert.fail('Status must use only saved bytes')
-  await assert.rejects(f.run('project-status'),/Saved local bytes changed/)
+  f.setActive(B);f.io.clientFactory=async()=>assert.fail('Status must use only its receipt')
+  const verifyLocal=f.io.verifyLocal,verifyStage=f.io.verifyStage
+  f.io.verifyLocal=async()=>assert.fail('Status must not hash saved local files')
+  f.io.verifyStage=async()=>assert.fail('Status must not hash saved project files')
+  await f.run('project-status')
+  assert.equal(f.events.at(-1).ready,true)
+  assert.equal(f.events.at(-1).canMove,true)
+  f.io.verifyLocal=verifyLocal;f.io.verifyStage=verifyStage
+  await assert.rejects(f.run('project-move'),/Saved local bytes changed/)
+  assert.equal(f.projects.get(B.account).length,1)
 })
 
 test('source changes during local copying prevent Ready and a retry captures local data again',async t=>{
@@ -264,8 +276,12 @@ test('a lost coordinator start response reuses the same restored project',async 
 test('project completion remains ready while local conversations still need to move',async t=>{
   const f=await fixture(t);await f.prepare();f.setActive(B);await f.run('project-move')
   f.io.clientFactory=async()=>assert.fail('The completed project phase must not open a cloud client')
+  const verifyLocal=f.io.verifyLocal
+  f.io.verifyLocal=async()=>assert.fail('Completed status must not hash saved local files')
+  f.io.verifyStage=async()=>assert.fail('Completed status must not hash saved project files')
   await f.run('project-status')
   assert.equal(f.events.at(-1).phase,'restored');assert.equal(f.events.at(-1).canMove,true)
+  f.io.verifyLocal=verifyLocal
   await f.run('project-move')
   assert.equal(f.events.at(-1).alreadyCurrent,true)
   assert.equal(f.events.at(-1).count,0)

@@ -9,7 +9,7 @@ Move Claude Code projects and local conversations to a verified Personal plan, t
 Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.13
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.14
 claude-transplant-resume menubar
 ```
 
@@ -87,7 +87,7 @@ When your allowance runs out, keep the source account signed into Claude Desktop
 
 You can then sign out and sign into the next Personal plan. **Move and resume** checks the saved files and the destination account. It uses the saved source data without a source login or a source cloud request. Changes made after preparation are not part of that copy. To include later work, click **Transplant** again before you sign out.
 
-The transfer creates a new private project, uploads the saved files and memory, and reads them back for verification. Native thread history cannot be imported: each thread and the main conversation are kept as reference files, indexed from project memory. With resume enabled, the app unpauses the new project and sends one coordinator request to continue unfinished work from those files. Acceptance of this request does not prove that a worker started or that its task finished. Clear **Resume stopped conversations** for a paused transfer with no continuation request.
+The transfer creates a new private project, pauses it, uploads the saved files and memory, and reads them back for verification. Claude requires an active project for file uploads, so the transfer enables the new project for those uploads and pauses it again before final verification. It accepts only Claude’s automatic welcome messages as initial conversation data. If Claude made a default memory note, the app replaces it only when its saved content hash still matches. User messages, new threads, and changed destination data stop the restore. Native thread history cannot be imported: each thread and the main conversation are kept as reference files, indexed from project memory. With resume enabled, the app unpauses the new project and sends one coordinator request to continue unfinished work from those files. Acceptance of this request does not prove that a worker started or that its task finished. Clear **Resume stopped conversations** for a paused transfer with no continuation request.
 
 The project collection follows its new destination. New projects made there join the next move. Projects that were already in that destination stay there, as with local conversations. The app does not keep a separate source login.
 
@@ -103,7 +103,7 @@ claude-transplant-resume project-move
 # The menu bar action also moves and resumes local conversations.
 ```
 
-`project-status --json` shows preparation status and counts. `project-move --no-resume` leaves the new projects paused. `project-select` and `project-stage` remain advanced commands for a single project. Source and destination projects remain available. A transfer rebuilds the saved state in new projects; it does not change ownership of the source projects.
+`project-status --json` reads the saved receipt to show preparation status and counts. It does not read every captured file. The move checks all saved file hashes before it writes destination data. `project-move --no-resume` leaves the new projects paused. `project-select` and `project-stage` remain advanced commands for a single project. Source and destination projects remain available. A transfer rebuilds the saved state in new projects; it does not change ownership of the source projects.
 
 ### Saved captures
 
