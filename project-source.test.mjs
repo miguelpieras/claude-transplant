@@ -146,6 +146,19 @@ test('captures artifact hook bytes and every attached output reference',async()=
   assert.equal(capture.libraryFiles.find(row=>row.id==='output-output1').bytes.toString(),'output')
 })
 
+test('verifies the final native report body even when its index timestamp stays the same',async()=>{
+  const id='33333333-3333-4333-8333-333333333333'
+  for(const changed of [false,true]){
+    const {client}=fixture({request(u){if(u.pathname.endsWith('/artifacts'))return {data:[{slug:id,title:'Report',updated_at:'2026-10-22T10:00:00Z'}],total:1,truncated:false}}})
+    let reads=0
+    client.projectArtifact=async()=>({metadata:{nativeStateCaptured:true,captureFormat:'native-state-json',contentSha256:sha(changed&&reads++?'changed':'current')},files:[{path:'native-state.json',bytes:Buffer.from('current native values')}]})
+    const capture=await collectProject(client,{},PROJECT)
+    assert.equal(capture.complete.library,!changed)
+    assert.equal(capture.libraryFiles.find(row=>row.originalPath===`artifacts/${id}/native-state.json`).nativeStateCaptured,true)
+    if(changed)assert.ok(capture.missing.some(row=>row.includes('native state changed')))
+  }
+})
+
 test('Pages reports require a current explicit content export and preserve its text limit',async()=>{
   const id='77777777-7777-4777-8777-777777777777',updatedAt='2026-10-22T10:00:00Z',bytes=Buffer.from('Full report text and original links')
   const {client}=fixture({request(u){

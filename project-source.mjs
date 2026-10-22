@@ -250,7 +250,7 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
       }
       if (kind==='artifact' && Array.isArray(value?.files) && value.files.length) {
         if(value.metadata)(capture.channel.libraryIndex.artifactCaptures??=[]).push({id,metadata:value.metadata})
-        for(const file of value.files){if(!safePath(file.path)||!Buffer.isBuffer(file.bytes)){miss('library',`artifact ${id} file is invalid`);continue}capture.libraryFiles.push({id:`artifact-${id}-${hash(file.path)}`,name:path.posix.basename(file.path),originalPath:`artifacts/${id}/${file.path}`,bytes:file.bytes})}
+        for(const file of value.files){if(!safePath(file.path)||!Buffer.isBuffer(file.bytes)){miss('library',`artifact ${id} file is invalid`);continue}capture.libraryFiles.push({id:`artifact-${id}-${hash(file.path)}`,name:path.posix.basename(file.path),originalPath:`artifacts/${id}/${file.path}`,bytes:file.bytes,...value.metadata?.nativeStateCaptured===true?{captureFormat:value.metadata.captureFormat,nativeStateCaptured:true}:{}})}
         continue
       }
       const bytes=await attempt('library',`${kind} ${id} content`,async()=>decodeBytes(value),null)
@@ -286,6 +286,10 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
     if(final&&(!Array.isArray(final.data)||digest(final)!==digest(initial)))miss('library',`${kind} index changed during capture`)
   }
   for(const [file,revision] of fileRevisions){if(revision===undefined)continue;const value=await attempt('library',`file ${file} final revision`,()=>post(`${base}/files:open`,{path:file,range_offset:0,range_length:1}),null);if(value&&value.content_revision!==revision)miss('library',`file ${file} revision changed during capture`)}
+  for(const artifact of capture.channel.libraryIndex.artifactCaptures??[])if(artifact.metadata.nativeStateCaptured===true){
+    const checked=await attempt('library',`artifact ${artifact.id} final native state`,()=>client.projectArtifact(artifact.id),null)
+    if(checked&&(!/^[a-f0-9]{64}$/.test(artifact.metadata.contentSha256??'')||checked.metadata?.contentSha256!==artifact.metadata.contentSha256))miss('library',`artifact ${artifact.id} native state changed during capture`)
+  }
   for(const check of localTranscriptChecks){const final=await attempt('localTranscripts',`thread ${check.threadId} final local transcript`,()=>localTranscript(paths,check.record),null);if(final&&hash(final.bytes)!==check.sha256)miss('localTranscripts',`thread ${check.threadId} local transcript changed during capture`)}
   capture.source.capturedAt=new Date().toISOString()
   return capture

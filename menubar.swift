@@ -1291,6 +1291,7 @@ struct TransplantApp: App {
 
     init() {
         let args = CommandLine.arguments
+        if let status = ProjectSourceWeb.runIfRequested(arguments: args) { exit(status) }
         if args.contains("--project-artifact-export") {
             exit(ProjectArtifactExporter.run(arguments: args))
         }

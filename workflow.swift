@@ -37,6 +37,7 @@ struct ProjectPlan: Decodable {
     let current: LocalAccount?
     let canStage: Bool
     let canMove: Bool
+    let sourceConnected: Bool?
     let preparedAt: String?
     let note: String?
     let projects: [Project]
@@ -48,6 +49,8 @@ struct LocalResult: Decodable {
     let resume: [ResumeItem]?
     let target: LocalAccount?
     let text: String?
+    let paused: Bool?
+    let accepted: Bool?
 }
 struct ResumeStatus: Decodable {
     struct Row: Decodable {
@@ -110,20 +113,26 @@ extension Model {
 
     func selectWorkflowProject() {
         guard let current = projectPlan?.current, !projectChoice.isEmpty, !flowBusy, !flowChecking else { return }
-        runWorkflowProject(["project-select", "--source", "\(current.account)/\(current.org)", "--project", projectChoice, "--json"], success: "Project selected. Prepare its latest state before you switch accounts.")
-    }
-
-    func prepareWorkflowProject() {
-        guard projectPlan?.canStage == true, !flowBusy, !flowChecking else { return }
-        runWorkflowProject(["project-stage", "--json"], success: "Latest project state prepared. Keep the source paused, then switch to the destination account.")
+        runWorkflowProject(["project-select", "--source", "\(current.account)/\(current.org)", "--project", projectChoice, "--json"], success: "Project selected. Move and resume will read its latest state when you change accounts.")
     }
 
     func moveWorkflowProject() {
         guard projectPlan?.canMove == true, !flowBusy, !flowChecking else { return }
-        runWorkflowProject(["project-move", "--json"], success: "Project transferred and verified. The new project is paused.")
+        var args = ["project-move", "--json"]
+        if !flowResume { args.append("--no-resume") }
+        runWorkflowProject(args, success: "Project transferred and paused.", projectMove: true)
     }
 
-    private func runWorkflowProject(_ args: [String], success: String) {
+    func connectWorkflowProject() {
+        guard projectPlan?.selected == true, !flowBusy, !flowChecking else { return }
+        runWorkflowProject(["project-connect", "--json"], success: "Source connected. Move and resume will read its latest state after you change Desktop accounts.")
+    }
+
+    private func projectSummary(accepted: Bool) -> String {
+        accepted ? "Project transferred. Continuation request accepted." : "Project transferred and paused."
+    }
+
+    private func runWorkflowProject(_ args: [String], success: String, projectMove: Bool = false) {
         flowBusy = true
         running = true
         flowActionError = ""
@@ -137,7 +146,7 @@ extension Model {
             guard let self else { return }
             flowBusy = false
             running = false
-            if status == 0, result?.ok == true { note = success }
+            if status == 0, result?.ok == true { note = projectMove ? projectSummary(accepted: result?.accepted == true) : success }
             else { flowActionError = error.isEmpty ? "The project operation did not finish. Refresh before retrying." : error }
             projectRefreshedAt = nil
             refreshWorkflow()
@@ -178,15 +187,17 @@ extension Model {
             }
             if project.selected, let source = project.source, source.account != plan.to.account || source.org != plan.to.org {
                 guard project.canMove, let current = project.current, current.account == plan.to.account, current.org == plan.to.org else {
-                    flowActionError = project.note ?? "Prepare the latest project state in its source account before you switch accounts."
+                    flowActionError = project.note ?? "Connect the source account in the separate login window, then try Move and resume again."
                     return
                 }
                 flowBusy = true
                 running = true
                 lines = []
-                note = "Transferring the prepared project"
+                note = "Reading and transferring the latest project state"
                 var result: LocalResult?
-                run(["project-move", "--json"], line: { [weak self] line in
+                var projectArgs = ["project-move", "--json"]
+                if !flowResume { projectArgs.append("--no-resume") }
+                run(projectArgs, line: { [weak self] line in
                     guard let data = line.data(using: .utf8), let event = try? JSONDecoder().decode(LocalResult.self, from: data) else { return }
                     if let text = event.text { self?.note = text }
                     if event.done == true { result = event }
@@ -201,7 +212,7 @@ extension Model {
                         return
                     }
                     projectRefreshedAt = nil
-                    startLocalWorkflow(plan, limitsOnly: limitsOnly, projectMoved: true)
+                    startLocalWorkflow(plan, limitsOnly: limitsOnly, projectMoved: true, projectResumed: result?.accepted == true)
                 }
                 return
             }
@@ -209,12 +220,12 @@ extension Model {
         startLocalWorkflow(plan, limitsOnly: limitsOnly)
     }
 
-    private func startLocalWorkflow(_ plan: LocalPlan, limitsOnly: Bool, projectMoved: Bool = false) {
+    private func startLocalWorkflow(_ plan: LocalPlan, limitsOnly: Bool, projectMoved: Bool = false, projectResumed: Bool = false) {
         flowBusy = true
         flowAlreadyRunning = []
         running = true
         lines = []
-        if projectMoved { lines.append(("project", "Project transferred and verified. The new project is paused.")) }
+        if projectMoved { lines.append(("project", projectSummary(accepted: projectResumed))) }
         badge = ""
         note = limitsOnly ? "Checking usage-limit errors" : plan.moving ? "Checking the destination" : "Checking stopped conversations"
         var result: LocalResult?
@@ -448,14 +459,15 @@ struct ProjectWorkflowPanel: View {
                     Text(project.title ?? "Selected project").font(.callout.weight(.semibold))
                     if let source = project.source { Text("Source: \(source.label ?? source.account)").font(.caption).foregroundStyle(.secondary) }
                     if let note = project.note { Text(note).font(.caption).foregroundStyle(.secondary) }
-                    if project.canStage {
-                        Text("Preparation pauses the source project and reads its latest state. Its workers must be idle.").font(.caption).foregroundStyle(.secondary)
-                        Button("Prepare for account switch") { model.prepareWorkflowProject() }
+                    if project.sourceConnected != true {
+                        Text("Connect once in a separate login window. Your Claude Desktop account stays selected.").font(.caption).foregroundStyle(.secondary)
+                        Button("Connect source") { model.connectWorkflowProject() }
                             .disabled(model.flowBusy || model.flowChecking)
                     }
-                    if project.canMove {
-                        Text("The new project stays paused. Threads and history are kept as reference files.").font(.caption).foregroundStyle(.secondary)
-                        Button("Transplant project") { model.moveWorkflowProject() }
+                    if project.canMove && model.flowPlan == nil {
+                        Toggle("Resume project coordinator", isOn: $model.flowResume).font(.caption).disabled(model.flowBusy)
+                        Text(model.flowResume ? "Threads and history are kept as reference files. The project coordinator continues from these files." : "Threads and history are kept as reference files. The new project stays paused.").font(.caption).foregroundStyle(.secondary)
+                        Button(model.flowResume ? "Move and resume" : "Move") { model.moveWorkflowProject() }
                             .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking)
                     }
                 } else if project.projects.isEmpty {

@@ -1990,7 +1990,7 @@ test('project artifact reads return safe metadata rather than viewer tokens or r
     assert.equal(endpoint,`/api/frame/${artifactId}`)
     assert.equal(options.method??'GET','GET')
     assert.equal(options.headers['X-Frame-CP'],'go')
-    return Response.json({title:'Report',ver:'revision',updated_at:'2026-10-22T10:00:00Z',contentStore:'pages',assetToken:'never-save-bootstrap',syncToken:'never-save-sync',files:['runtime.js']})
+    return Response.json({title:'Report',ver:'revision',updated_at:'2026-10-22T10:00:00Z',contentStore:'unsupported',assetToken:'never-save-bootstrap',syncToken:'never-save-sync',files:['runtime.js']})
   })
   const client=await cloudClient(h.paths,{account:h.acct.P,org:h.org.P,label:'Source'},{active:{state:'unknown'},cookies:new Map([['sessionKey','fixture']]),userAgent:'fixture'})
   const value=await client.projectArtifact(artifactId)

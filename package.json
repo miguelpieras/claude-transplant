@@ -1,6 +1,6 @@
 {
   "name": "@miguelpieras/claude-transplant",
-  "version": "4.1.3-resume.7",
+  "version": "4.1.3-resume.8",
   "description": "Move local Claude Desktop Code sessions to a verified Personal plan and resume interrupted work. Unofficial macOS beta.",
   "type": "module",
   "bin": {
@@ -15,13 +15,17 @@
     "project-transfer.mjs",
     "project-cli.mjs",
     "project-artifacts.mjs",
+    "project-web.mjs",
+    "source-web.swift",
+    "project-resume.mjs",
+    "project-native-artifacts.mjs",
     "project-artifact-export.swift",
     "workflow.swift",
     "transplant.test.js",
     "local-workflow.test.mjs"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.21"
   },
   "scripts": {
     "test": "node --test"

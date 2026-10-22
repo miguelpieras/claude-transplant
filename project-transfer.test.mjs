@@ -108,6 +108,16 @@ test('source edits during staging cannot produce a ready transfer',async t=>{
   await assert.rejects(stat(f.prepared),{code:'ENOENT'})
 })
 
+test('the source stamp includes current native report content beyond the unchanged index',async t=>{
+  const f=await fixture(t),request=f.client.projectRequest
+  f.client.projectRequest=async(endpoint,...args)=>endpoint.includes('/artifacts?')?{data:[{slug:'55555555-5555-4555-8555-555555555555',updated_at:NOW}]}:request(endpoint,...args)
+  let body='current'
+  f.client.projectArtifact=async()=>({metadata:{nativeStateCaptured:true,contentSha256:hash(body)}})
+  const initial=await projectTransferStamp(f.client,PROJECT)
+  body='edited while its index stayed unchanged'
+  assert.notEqual(await projectTransferStamp(f.client,PROJECT),initial)
+})
+
 test('restore creates one paused project and verifies settings, memory and file bytes',async t=>{
   const f=await fixture(t);await f.stage()
   const result=await restoreProjectTransfer(f.destination,f.prepared)

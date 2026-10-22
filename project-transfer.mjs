@@ -86,8 +86,16 @@ export async function projectTransferStamp(client,projectId) {
   for(const root of [...roots].sort((a,b)=>a.id.localeCompare(b.id)))histories.push({id:root.id,data:await messagePages(client,`${base}/threads/${root.id}`)})
   const artifacts=await client.projectRequest(`${base}/artifacts?limit=50`),attachments=await client.projectRequest(`${base}/attachments?limit=100`)
   for(const index of [artifacts,attachments])if(!Array.isArray(index?.data)||index.truncated===true||Number(index.total??index.data.length)>index.data.length)fail('Project output index is incomplete')
+  const nativeReports=[]
+  if(typeof client.projectArtifact==='function')for(const artifact of artifacts.data){
+    const id=artifact.id??artifact.slug,value=await client.projectArtifact(id)
+    if(value?.metadata?.nativeStateCaptured===true){
+      if(!/^[a-f0-9]{64}$/.test(value.metadata.contentSha256??''))fail('The current native report content could not be checked')
+      nativeReports.push({id,contentSha256:value.metadata.contentSha256})
+    }
+  }
   const settings=Object.fromEntries(['id','name','topic','icon','color','visibility','disabled_at','overview_session_id','channel_session_id','default_environment_id','context_sources'].map(key=>[key,channel[key]??null]))
-  return sha(canonical({settings,config:(await client.projectRequest(`${base}/config`))?.config,graph:roots.map(root=>({id:root.id,title:root.display_name??root.title??null,status:root.thread_status??null,resolvedAt:root.resolved_at??null,replies:root.reply_count??null,lastReplyAt:root.last_reply_at??null,bindings:(root.bound_sessions??[]).map(row=>wire(row.id)).sort()})).sort((a,b)=>a.id.localeCompare(b.id)),histories,timeline:await messagePages(client,`${base}/timeline`,{include_replies:'true',include_bound_session_rows:'true'}),sessions,memory:await memoryIndex(client,projectId),files:await libraryIndex(client,projectId),artifacts:artifacts.data,attachments:attachments.data}))
+  return sha(canonical({settings,config:(await client.projectRequest(`${base}/config`))?.config,graph:roots.map(root=>({id:root.id,title:root.display_name??root.title??null,status:root.thread_status??null,resolvedAt:root.resolved_at??null,replies:root.reply_count??null,lastReplyAt:root.last_reply_at??null,bindings:(root.bound_sessions??[]).map(row=>wire(row.id)).sort()})).sort((a,b)=>a.id.localeCompare(b.id)),histories,timeline:await messagePages(client,`${base}/timeline`,{include_replies:'true',include_bound_session_rows:'true'}),sessions,memory:await memoryIndex(client,projectId),files:await libraryIndex(client,projectId),artifacts:artifacts.data,attachments:attachments.data,nativeReports:nativeReports.sort((a,b)=>a.id.localeCompare(b.id))}))
 }
 async function frozenSource(client,id,disabledAt=null) {
   const channel=await pausedChannel(client,id,disabledAt)
@@ -133,7 +141,7 @@ export async function stageProjectTransfer(client,paths,projectId,output,{export
       const missing=verified.manifest.missing.join(' ')
       if(missing.includes('PROJECT_REPORT_LOCKED'))fail('The source project is paused. Unlock the Mac, keep Claude open in the source account, and prepare the project again.')
       if(missing.includes('PROJECT_REPORT_ACCESSIBILITY'))fail('The source project is paused. Enable Claude Transplant Resume in System Settings > Privacy & Security > Accessibility, then prepare the project again.')
-      if(missing.includes('PROJECT_REPORT_UNAVAILABLE'))fail('The source project is paused. A current report could not be read and checked. Keep Claude open and unlocked in the source account, then prepare the project again.')
+      if(missing.includes('PROJECT_REPORT_UNAVAILABLE'))fail('The source project is paused. A current report could not be read and checked. Use Connect source in Transplant, then retry Move and resume.')
       fail('The final project capture is incomplete. Keep the source paused and stage again.')
     }
     const final=await frozenSource(client,projectId,receipt.sourceDisabledAt)
@@ -312,6 +320,6 @@ export async function restoreProjectTransfer(client,preparationDir,{report=()=>{
   if(finalFiles.length!==plan.libraryUploads.length||finalMemories.length!==plan.memoryUploads.length)fail('Destination file inventory changed during restore')
   for(const upload of plan.libraryUploads)await checkLibrary(client,id,upload)
   for(const upload of plan.memoryUploads){const entry=finalMemories.find(item=>item.path===upload.path);if(!entry)fail('Destination memory is absent');await checkMemory(client,id,upload,entry)}
-  receipt.status='complete';receipt.completedAt=new Date().toISOString();await state(stageRoot,'restore.json',receipt)
+  receipt.status='complete';receipt.verified=true;receipt.completedAt=new Date().toISOString();await state(stageRoot,'restore.json',receipt)
   return{path:stageRoot,projectId:id,targetProjectId:id,destination:receipt.destination,restored:true,paused:true,nativeHistoryImport:false,autoResume:false}
 }

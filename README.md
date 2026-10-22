@@ -6,10 +6,10 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 
 ## Install
 
-Requires macOS 13 or later, Node.js 22 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`).
+Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.7
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.8
 claude-transplant-resume menubar
 ```
 
@@ -64,7 +64,7 @@ The app is compiled locally and is not notarized. Rebuilding or updating it can 
 - Scheduled-task settings move with their records; disabled tasks stay disabled. Scheduled runs are not resumed by this button.
 - Account verification reads the current Claude Desktop login, including its cookie database and Safe Storage key in macOS Keychain. It makes authenticated requests only to `https://claude.ai` to read account and organization metadata. Successful checks are cached for up to five minutes. No cookie or key is saved in the fork's settings.
 - The app stores account labels, record IDs, and move/resume metadata locally in `~/Library/Application Support/claude-transplant-resume/`. Do not upload that folder to a public issue.
-- The local conversation workflow does not move ordinary Claude web chats or remote-only conversations. Code Projects use the separate preparation and transfer controls described below. A destination must be a verified Personal Max/Pro plan; Team and Enterprise destinations are blocked.
+- The local conversation workflow does not move ordinary Claude web chats or remote-only conversations. Selected Code Projects move through the same button, as described below. A destination must be a verified Personal Max/Pro plan; Team and Enterprise destinations are blocked.
 
 The original advanced CLI remains in the source. Its `--cloud` mode can read and modify Remote Control state; it is separate from this menubar workflow. Refer to the [upstream 4.1.2 documentation](https://github.com/vitaliyhayda/claude-transplant/tree/v4.1.2), substituting the `claude-transplant-resume` command. Do not mix that workflow with an active collection.
 
@@ -81,25 +81,27 @@ Removal stops the app and removes its login item. It retains local move metadata
 
 ## Transfer a Code Project in its latest state
 
-Select the project in the menu bar while signed into its source account. Use **Prepare for account switch** when you want to transfer it. Preparation pauses the source project, requires idle workers, reads its latest state, and verifies the capture. It does not use the old capture from an earlier transfer. Missing content or a changing source prevents a ready result. Keep the source paused after preparation.
+Select the project in the menu bar while signed into its source account. Use **Connect source** once to sign into that account in Transplant's separate login window. This keeps source access separate from the Claude Desktop login. No source preparation or Desktop account switch back is required.
 
-Keep the Mac unlocked and Claude open during preparation. Current native report text is read through Claude's Accessibility interface. Enable **Claude Transplant Resume** in macOS Accessibility settings if requested. A locked Mac, an unreadable report, or a report whose ID cannot be checked stops preparation; an older saved report is never used.
+When your allowance runs out, sign into the next Personal plan in Claude Desktop and click **Move and resume**. On that click, Transplant checks the destination, pauses the source project, waits for idle workers, and reads its current settings, memory, thread history, files, and native report state. It checks the source again before it creates the destination. Missing content, running workers, or source changes stop the transfer. An older capture is never substituted.
 
-Then sign into the destination Personal plan. Use **Transplant project**, or use **Move and resume** to transfer the prepared project before the local conversations. The project transfer creates a new private project, uploads and reads back the prepared files and memory, and leaves the destination paused. It does not send messages or start its workers. An interrupted upload can resume in the same new project.
+The transfer creates a new private project, uploads the current files and memory, and reads them back for verification. Native thread history cannot be imported: each thread and the main conversation are kept as reference files, indexed from project memory. With resume enabled, the app unpauses the new project and sends one coordinator request to continue unfinished work from those files. Acceptance of this request does not prove that a worker started or that its task finished. Clear **Resume stopped conversations** for a paused transfer with no continuation request.
 
-The project selection follows its new destination. Before another transfer, prepare it again from that account. Changes made after preparation require a fresh preparation. The tool does not retain source login cookies, so preparation must finish before you sign out of the source account.
+The project selection follows its new destination. Each source account needs its own **Connect source** login once. A saved connection can be used again while it remains valid. If it expires, reconnect it in Transplant; Desktop can stay on the destination. The source login is held in a separate macOS WebKit store for that account. The app stores only public connection metadata in its settings and uses source cookies in memory for requests.
+
+An interrupted restore uses the same new project after a live source check. A continuation retry uses the same saved message ID. The source remains paused after a successful transfer.
 
 The same flow is available in the CLI:
 
 ```sh
 claude-transplant-resume project-select \
   --project chan_PROJECT_ID --source ACCOUNT_UUID/ORGANIZATION_UUID
-claude-transplant-resume project-stage
+claude-transplant-resume project-connect
 # Switch accounts in Claude Desktop.
 claude-transplant-resume project-move
 ```
 
-`project-status --json` shows the selection and whether it can be prepared or transferred. Source and destination projects remain available. A transfer rebuilds the current state in a new project; it does not change ownership of the source project.
+`project-status --json` shows the selection and source connection. `project-move --no-resume` leaves the new project paused. `project-stage` remains an advanced manual capture command. Source and destination projects remain available. A transfer rebuilds the current state in a new project; it does not change ownership of the source project.
 
 ### Saved captures
 
@@ -157,7 +159,7 @@ swiftc -parse-as-library -typecheck menubar.swift workflow.swift project-artifac
 npm pack --dry-run
 ```
 
-There are no runtime npm dependencies. `transplant.js` keeps the upstream engine and account discovery. `local-workflow.mjs` isolates collection selection, local moves, and recovery. `project-source.mjs` reads Code Project data, and `project-workflow.mjs` verifies captures and prepares rebuild files. `project-transfer.mjs` stages current project state and restores it, and `project-cli.mjs` keeps the selected project across account switches. `workflow.swift` holds the native controls and Accessibility operations. Tests use synthetic records and transcripts.
+There are no runtime npm dependencies. `transplant.js` keeps the upstream engine and account discovery. `local-workflow.mjs` isolates local moves and recovery. The project modules read and verify current source data, restore it, and send one continuation request. `source-web.swift` keeps source logins separate from Desktop. `workflow.swift` holds the native controls and Accessibility operations. Tests use synthetic records and transcripts.
 
 The local predecessor was tested with live moves and resumed conversations on macOS 15.7.9 and Claude Desktop 2.26454.2. The release checks cover synthetic fresh setup, moves, collisions, rollback, crash recovery, resume selection, packaging, and Swift compilation. Wider macOS and Claude Desktop compatibility is untested. Claude's local file format, log messages, and controls can change.
 

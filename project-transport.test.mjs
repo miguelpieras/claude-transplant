@@ -58,3 +58,33 @@ test('a changed response organization stops a project mutation',async t=>{
   const {client}=await fixture(t,()=>Response.json({},{headers:{'anthropic-organization-id':ACCOUNT}}))
   await assert.rejects(client.projectWrite('/v1/code/channels',{method:'POST',body:'{"name":"New"}'}),/organization changed/)
 })
+
+test('project continuation sends only plain text with one stable request ID',async t=>{
+  const {client,calls}=await fixture(t)
+  await client.projectWrite('/v1/code/channels/chan_target/messages',{method:'POST',body:JSON.stringify({body:'Continue the unfinished task.',client_message_id:ACCOUNT})})
+  for(const body of [{body:'Continue.'},{body:'Continue.',client_message_id:ACCOUNT,session_id:'cse_foreign'},{body:'',client_message_id:ACCOUNT}]){
+    assert.throws(()=>client.projectWrite('/v1/code/channels/chan_target/messages',{method:'POST',body:JSON.stringify(body)}),/stable message ID/)
+  }
+  assert.equal(calls.length,1)
+})
+
+test('a separate source web login is pinned while Desktop is signed into another account',async t=>{
+  const calls=[]
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    calls.push(new URL(url).pathname)
+    assert.equal(new URL(url).origin,'https://claude.ai')
+    assert.equal(options.headers.cookie,'sessionKey=fixture-source-session')
+    assert.equal(Object.hasOwn(options.headers,'authorization'),false)
+    if(new URL(url).pathname==='/api/account')return Response.json({uuid:ACCOUNT,email:'source@example.test'})
+    if(new URL(url).pathname==='/api/organizations')return Response.json([{uuid:ORG}])
+    assert.equal(options.headers['x-organization-uuid'],ORG)
+    return Response.json({channel:{id:'chan_source'}},{headers:{'anthropic-organization-id':ORG}})
+  })
+  const io={cookies:new Map([['sessionKey','fixture-source-session']]),userAgent:'fixture',active:{state:'known',account:ORG,org:ACCOUNT}}
+  const client=await cloudClient({}, {account:ACCOUNT,org:ORG,label:'Source'}, io)
+  assert.equal(client.identity.email,'source@example.test')
+  assert.equal((await client.projectRequest('/v1/code/channels/chan_source')).channel.id,'chan_source')
+  assert.deepEqual(calls,['/api/account','/api/organizations','/v1/code/channels/chan_source'])
+  await assert.rejects(cloudClient({}, {account:ORG,org:ORG,label:'Source'}, io),/sign Claude Desktop into Source/)
+  assert.equal(calls.length,4)
+})

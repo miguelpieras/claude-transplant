@@ -50,8 +50,9 @@ const HELP = `claude-transplant-resume   move Claude Code history between accoun
   claude-transplant-resume project-prepare --capture <folder> --output <folder>  prepare files for a project rebuild
   claude-transplant-resume project-status --json  show the selected project and transfer state
   claude-transplant-resume project-select --project <chan_id> --source <account/org>  select a live project
-  claude-transplant-resume project-stage  pause the source and prepare its latest state before an account switch
-  claude-transplant-resume project-move  rebuild the prepared project in the current Personal account
+  claude-transplant-resume project-connect  connect the selected source once, independently of Claude Desktop
+  claude-transplant-resume project-stage  manually pause and capture the selected source project
+  claude-transplant-resume project-move  read the latest source project, move it, and request continuation
 
   --from <match> --to <match>   skip the picker, match on email, org name, or uuid prefix
   --cloud                       reconcile active source, queue remaining local work and known source mirrors
@@ -924,7 +925,7 @@ export async function cloudClient(paths, expected = null, io = {}) {
     org,
     identity: {
       account: account.uuid,
-      email: account.email_address ?? null,
+      email: account.email_address ?? account.email ?? null,
       organizations: organizations.map(item => ({ org: item.uuid, name: item.name ?? null, capabilities: item.capabilities ?? [] }))
     },
     list: async () => {
@@ -946,12 +947,14 @@ export async function cloudClient(paths, expected = null, io = {}) {
     projectWrite: (endpoint, options = {}) => {
       const method = options.method
       const permitted = method === 'POST' && /^\/v1\/code\/(?:channels|channels\/chan_[A-Za-z0-9]+\/files:write|memory\/channel\/chan_[A-Za-z0-9]+\/memories)$/.test(endpoint)
+        || method === 'POST' && /^\/v1\/code\/channels\/chan_[A-Za-z0-9]+\/messages$/.test(endpoint)
         || method === 'PATCH' && /^\/v1\/code\/channels\/chan_[A-Za-z0-9]+(?:\/config)?$/.test(endpoint)
       if (!permitted) throw new Error('Invalid project transfer write')
       const value = JSON.parse(options.body ?? 'null')
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Project transfer requires a JSON object')
       if (endpoint.endsWith('/memories') && value.precondition?.type !== 'not_exists') throw new Error('Project memory transfer requires a new path')
       if (endpoint.endsWith('/files:write') && (!Array.isArray(value.files) || !value.files.length || value.files.some(file => file.overwrite !== false))) throw new Error('Project file transfer cannot overwrite files')
+      if (endpoint.endsWith('/messages') && (typeof value.body !== 'string' || !value.body.trim() || !UUID.test(value.client_message_id ?? '') || Object.keys(value).some(key=>!['body','client_message_id'].includes(key)))) throw new Error('Project continuation requires a stable message ID and plain text')
       return request(endpoint, {method,body:JSON.stringify(value),headers:{'content-type':'application/json','anthropic-beta':'ccr-byoc-2025-07-29','anthropic-client-feature':'ccr'}})
     },
     projectUpload: async (projectId, targetPath, bytes) => {
@@ -970,10 +973,20 @@ export async function cloudClient(paths, expected = null, io = {}) {
     },
     projectArtifact: async (id) => {
       if (!UUID.test(id ?? '')) throw new Error('Invalid project artifact ID')
-      const boot = await request(`/api/frame/${id}?org=${org}&bk=initial&actor=id&vt=1`,{headers:{'X-Frame-CP':'go','X-Frame-Surface':'standalone','X-Frame-Platform':'desktop'}})
+      const headers={cookie,'user-agent':userAgent,origin:'https://claude.ai',referer:`https://claude.ai/code/artifact/${id}?org=${org}&surface=code&product=viewer`,'X-Frame-CP':'go','X-Frame-Surface':'code','X-Frame-Platform':'desktop','Sec-Fetch-Site':'same-origin','Sec-Fetch-Mode':'cors','Sec-Fetch-Dest':'empty'}
+      const frameRequest=async(endpoint,options={})=>{
+        if(!new RegExp(`^/api/frame/(?:${id}|lane/bongo/${id}/subscribe)\\?`).test(endpoint))throw new Error('Invalid native report endpoint')
+        const response=await fetch(`https://claude.ai${endpoint}`,{...options,headers:{...headers,...options.headers},redirect:'error',signal:AbortSignal.timeout(30000)})
+        if(!response.ok)throw new Error(`Native report read returned HTTP ${response.status}`)
+        return response.json()
+      }
+      const boot = await frameRequest(`/api/frame/${id}?org=${org}&bk=initial&actor=id&vt=1`)
       const metadata={id,title:boot.title??'',version:boot.ver??null,updatedAt:boot.updated_at??null,kind:boot.kind??null,contentStore:boot.contentStore??null,typeSlug:boot.typeSlug??null}
-      // Runtime source files are not document content. Keep bootstrap tokens out
-      // of captures and require an explicit export of the actual document.
+      if(boot.contentStore==='pages' && boot.syncToken){
+        const {collectNativeProjectArtifact}=await import('./project-native-artifacts.mjs')
+        return collectNativeProjectArtifact({id,org,boot,request:frameRequest,openSocket:(url,protocols)=>new WebSocket(url,{protocols,headers})})
+      }
+      // Unsupported report types still need an explicit current export.
       return {requiresContentExport:true,metadata}
     },
     archive: (id) => request(`/v1/code/sessions/${wireRemoteId(id)}/archive`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
@@ -4152,7 +4165,7 @@ const plist = (dict) => {
 }
 
 const compileMenubar = (source, binary) => {
-  const build = spawnSync('swiftc', ['-O', '-parse-as-library', '-o', binary, source, path.join(path.dirname(source), 'workflow.swift'), path.join(path.dirname(source), 'project-artifact-export.swift')], { encoding: 'utf8' })
+  const build = spawnSync('swiftc', ['-O', '-parse-as-library', '-o', binary, source, path.join(path.dirname(source), 'workflow.swift'), path.join(path.dirname(source), 'project-artifact-export.swift'), path.join(path.dirname(source),'source-web.swift')], { encoding: 'utf8' })
   if (build.error) throw new Error('swiftc not found, run xcode-select --install')
   if (build.status !== 0) throw new Error(`swiftc failed\n${build.stderr.trim()}`)
 }
@@ -4187,7 +4200,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
     }
     return `snapshot written | ${output}`
   }
-  const key = sha((await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE,'project-artifact-export.swift'),'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
+  const key = sha((await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE,'project-artifact-export.swift'),'utf8')) + (await readFile(path.join(HERE,'source-web.swift'),'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
   const built = path.join(app, 'Contents/Resources/build.sha256')
   if ((await readFile(built, 'utf8').catch(() => '')) !== key) {
     const fresh = `${app}.building`
@@ -4216,7 +4229,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
   const script = path.join(app, 'Contents/Resources/transplant.js')
   await copyFile(path.join(HERE, 'transplant.js'), script)
   await copyFile(path.join(HERE, 'local-workflow.mjs'), path.join(app, 'Contents/Resources/local-workflow.mjs'))
-  for (const name of ['project-workflow.mjs', 'project-source.mjs', 'project-transfer.mjs', 'project-cli.mjs', 'project-artifacts.mjs']) await copyFile(path.join(HERE, name), path.join(app, 'Contents/Resources', name))
+  for (const name of ['project-workflow.mjs', 'project-source.mjs', 'project-transfer.mjs', 'project-cli.mjs', 'project-artifacts.mjs', 'project-web.mjs', 'project-native-artifacts.mjs', 'project-resume.mjs']) await copyFile(path.join(HERE, name), path.join(app, 'Contents/Resources', name))
   await copyFile(path.join(HERE, 'package.json'), path.join(app, 'Contents/Resources/package.json'))
   const config = jsonText({ node: process.execPath, script })
   await writeFile(path.join(paths.state, 'menubar.json'), config)
@@ -4269,18 +4282,18 @@ function parse(argv) {
   if (args.cmd !== 'menubar' && (args.remove || args.snapshot)) throw new Error('--remove and --snapshot require menubar')
   if (args.source !== null && !['local-source','project-capture','project-select'].includes(args.cmd)) throw new Error('--source requires local-source, project-capture, or project-select')
   if (args.cmd === 'local-source' && !args.source) throw new Error('local-source requires --source <account/org>')
-  if (args.noResume && !['local-plan','local-move'].includes(args.cmd)) throw new Error('--no-resume requires local-plan or local-move')
+  if (args.noResume && !['local-plan','local-move','project-move'].includes(args.cmd)) throw new Error('--no-resume requires local-plan, local-move, or project-move')
   if (args.limitsOnly && (!['local-plan','local-move'].includes(args.cmd) || args.noResume)) throw new Error('--limits-only requires local-plan or local-move without --no-resume')
-  const projectCommand = ['project-capture','project-verify','project-prepare','project-status','project-select','project-stage','project-move'].includes(args.cmd)
+  const projectCommand = ['project-capture','project-verify','project-prepare','project-status','project-select','project-connect','project-stage','project-move'].includes(args.cmd)
   if (!projectCommand && (args.project || args.output || args.capture)) throw new Error('--project, --output, and --capture require a project command')
   if (args.artifactExports && args.cmd!=='project-capture') throw new Error('--artifact-exports requires project-capture')
   if (projectCommand) {
-    if (incompatible || args.restartApproved || args.moveOnly || args.noResume || args.limitsOnly) throw new Error('Project commands do not move or resume local conversations')
+    if (incompatible || args.restartApproved || args.moveOnly || args.noResume && args.cmd!=='project-move' || args.limitsOnly) throw new Error('Project commands do not move or resume local conversations')
     if (args.cmd === 'project-capture' && (!/^chan_[A-Za-z0-9]+$/.test(args.project ?? '') || !args.output || !new RegExp(`^${UUID_PATTERN}/${UUID_PATTERN}$`,'i').test(args.source ?? '') || args.capture)) throw new Error('project-capture requires --project <chan_id> --source <account/org> --output <folder>')
     if (args.cmd === 'project-verify' && (!args.capture || args.project || args.output)) throw new Error('project-verify requires only --capture <folder>')
     if (args.cmd === 'project-prepare' && (!args.capture || !args.output || args.project)) throw new Error('project-prepare requires --capture <folder> --output <folder>')
     if (args.cmd === 'project-select' && (!/^chan_[A-Za-z0-9]+$/.test(args.project??'') || !new RegExp(`^${UUID_PATTERN}/${UUID_PATTERN}$`,'i').test(args.source??'') || args.output || args.capture)) throw new Error('project-select requires --project <chan_id> --source <account/org>')
-    if (['project-status','project-stage','project-move'].includes(args.cmd) && (args.project || args.source || args.output || args.capture)) throw new Error(`${args.cmd} uses the selected project and accepts only --json`)
+    if (['project-status','project-connect','project-stage','project-move'].includes(args.cmd) && (args.project || args.source || args.output || args.capture)) throw new Error(`${args.cmd} uses the selected project and accepts only --json`)
   }
   return args
 }
@@ -4291,11 +4304,12 @@ async function main(argv) {
   const args = parse(argv)
   if (args.help) return process.stdout.write(HELP)
   if (args.version) return process.stdout.write(`${(await readJson(path.join(HERE, 'package.json'))).version}\n`)
-  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node 22 or newer is required')
+  const [nodeMajor,nodeMinor]=process.versions.node.split('.').map(Number)
+  if (nodeMajor<22||nodeMajor===22&&nodeMinor<21) throw new Error('Node 22.21 or newer is required')
   const paths = layout()
   const out = process.stdout
   const emit = (o) => out.write(`${JSON.stringify(o)}\n`)
-  if (['project-status','project-select','project-stage','project-move'].includes(args.cmd)) {
+  if (['project-status','project-select','project-connect','project-stage','project-move'].includes(args.cmd)) {
     const {runProjectCommand}=await import('./project-cli.mjs')
     return runProjectCommand(paths,args,args.json?emit:value=>out.write(`${value.text??JSON.stringify(value)}\n`))
   }

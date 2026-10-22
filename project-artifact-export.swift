@@ -59,7 +59,7 @@ enum ProjectArtifactExporter {
     static func matches(_ url: URL, id: String, shortID: String) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         if host == "claude.ai" || host == "claude.com" {
-            let validPrefix = ["/artifact/", "/code/artifact/", "/code/frame/"].contains { url.path.hasPrefix($0) }
+            let validPrefix = ["/artifact/", "/code/artifact/", "/code/frame/", "/epitaxy/artifact/"].contains { url.path.hasPrefix($0) }
             guard validPrefix else { return false }
             let name = url.lastPathComponent
             return name.lowercased() == id.lowercased() || name == shortID || name.lowercased().hasSuffix("-" + id.lowercased()) || name.hasSuffix("-" + shortID)
@@ -72,7 +72,10 @@ enum ProjectArtifactExporter {
     }
     static func content(_ area: AXUIElement) throws -> Content {
         var lines: [String] = [], links: [[String: String]] = []
-        for node in try nodes(area) {
+        let tree = try nodes(area)
+        let values = tree.filter { string($0, kAXRoleAttribute) == kAXTextAreaRole }.map { string($0, kAXValueAttribute) }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let uniqueValues = Array(Set(values))
+        for node in tree {
             let role = string(node, kAXRoleAttribute)
             if role == kAXStaticTextRole {
                 let value = string(node, kAXValueAttribute)
@@ -89,9 +92,8 @@ enum ProjectArtifactExporter {
         }
         // Some Electron editor frames expose the document through an AXTextArea
         // value instead of individual static text nodes.
-        if lines.joined().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let values = try nodes(area).filter { string($0, kAXRoleAttribute) == kAXTextAreaRole }.map { string($0, kAXValueAttribute) }
-            if let value = values.max(by: { $0.utf8.count < $1.utf8.count }), !value.isEmpty { lines = [value] }
+        if uniqueValues.count == 1, let value = uniqueValues.first, value.trimmingCharacters(in: .whitespacesAndNewlines).count >= 20 {
+            lines = [value]
         }
         return Content(text: lines.joined(separator: "\n"), links: links)
     }
@@ -107,14 +109,17 @@ enum ProjectArtifactExporter {
             let descendants = try nodes(area).filter { string($0, kAXRoleAttribute) == "AXWebArea" }
             let nested = descendants.filter { !CFEqual($0, area) }
             let verified = nested.filter { node in address(node).map { matches($0, id: id, shortID: shortID) } == true }
+            // Claude nests a route, a viewer, and a document editor. Only the
+            // innermost frame with this ID owns the editor; outer frames also
+            // contain their toolbar and must not produce a second candidate.
+            if !verified.isEmpty { continue }
             // A nested frame can hold another document or the chat panel. Its
             // text length is not proof of ownership. Use an exact document URL,
             // or the sole nested editor beneath an exact document URL.
             let selected: [AXUIElement]
-            if !verified.isEmpty { selected = verified }
-            else if nested.count <= 1 {
+            if nested.count <= 1 {
                 if let only = nested.first, let url = address(only), let host = url.host?.lowercased() {
-                    let documentRoute = (host == "claude.ai" || host == "claude.com") && ["/artifact/", "/code/artifact/", "/code/frame/"].contains { url.path.hasPrefix($0) }
+                    let documentRoute = (host == "claude.ai" || host == "claude.com") && ["/artifact/", "/code/artifact/", "/code/frame/", "/epitaxy/artifact/"].contains { url.path.hasPrefix($0) }
                     if documentRoute || host.hasSuffix(".claudeusercontent.com") { throw Failure(message: "The report contains multiple document frames. Its current text could not be selected by document ID. No report was exported.") }
                 }
                 selected = nested.isEmpty ? [area] : nested
