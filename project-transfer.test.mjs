@@ -129,6 +129,41 @@ test('source edits during staging cannot produce a ready transfer',async t=>{
   await assert.rejects(stat(f.prepared),{code:'ENOENT'})
 })
 
+test('read-time worker timestamps do not block staging or change saved message bytes',async t=>{
+  const f=await fixture(t),request=f.client.projectRequest
+  let reads=0
+  f.client.projectRequest=async(endpoint,...args)=>{
+    const response=await request(endpoint,...args),pathname=new URL(endpoint,'https://claude.ai').pathname
+    if(pathname.endsWith('/timeline')||pathname.endsWith(`/threads/${THREAD}`))response.data=response.data.map(row=>({...row,thread_own_session_at:new Date(Date.parse(NOW)+ ++reads).toISOString()}))
+    return response
+  }
+  const result=await f.stage()
+  assert.equal(result.ready,true)
+  assert.equal(result.transfer.sourceStamp,await projectTransferStamp(f.client,PROJECT))
+  const capture=path.join(f.output,'capture'),manifest=JSON.parse(await readFile(path.join(capture,'manifest.json'),'utf8'))
+  for(const role of ['coordinator-history','thread-history']){
+    const entry=manifest.files.find(file=>file.role===role),history=JSON.parse(await readFile(path.join(capture,entry.path),'utf8'))
+    assert.ok(history.data.length)
+    assert.ok(history.data.every(row=>Number.isFinite(Date.parse(row.thread_own_session_at))))
+  }
+})
+
+test('message content, attachments, session bindings, and status remain part of the source stamp',async t=>{
+  for(const route of ['timeline',`threads/${THREAD}`])for(const [field,value] of Object.entries({body:'A real edit',attachments:[{file_id:'file_changed'}],bound_sessions:[{id:'cse_changed'}],thread_status:'working'})){
+    const f=await fixture(t),request=f.client.projectRequest
+    let changed=false,reads=0
+    f.client.projectRequest=async(endpoint,...args)=>{
+      const response=await request(endpoint,...args)
+      if(new URL(endpoint,'https://claude.ai').pathname.endsWith(`/${route}`))response.data[0]={...response.data[0],thread_own_session_at:new Date(Date.parse(NOW)+ ++reads).toISOString(),...changed?{[field]:value}:{}}
+      return response
+    }
+    const before=await projectTransferStamp(f.client,PROJECT)
+    assert.equal(await projectTransferStamp(f.client,PROJECT),before,`${route}: timestamp only`)
+    changed=true
+    assert.notEqual(await projectTransferStamp(f.client,PROJECT),before,`${route}: ${field}`)
+  }
+})
+
 test('the source stamp includes current native report content beyond the unchanged index',async t=>{
   const f=await fixture(t),request=f.client.projectRequest
   f.client.projectRequest=async(endpoint,...args)=>endpoint.includes('/artifacts?')?{data:[{slug:'55555555-5555-4555-8555-555555555555',updated_at:NOW}]}:request(endpoint,...args)

@@ -74,6 +74,8 @@ async function messagePages(client,endpoint,query={}) {
   }
   fail('Project messages exceeded their page limit')
 }
+// Claude updates this worker timestamp on reads. It does not change the message.
+const stableMessages=rows=>rows.map(({thread_own_session_at,...message})=>message)
 export async function projectTransferStamp(client,projectId) {
   identity(client)
   if(!CHANNEL.test(projectId??''))fail('A valid source project ID is required')
@@ -83,7 +85,7 @@ export async function projectTransferStamp(client,projectId) {
   const sessions=[]
   for(const id of ids){if(!SESSION.test(id))fail('Invalid source session ID');const response=await client.session(id),session=response?.session??response;if(wire(session?.id??'')!==wire(id))fail('Source session identity changed');sessions.push({id:wire(id),...stamp(session)})}
   const histories=[]
-  for(const root of [...roots].sort((a,b)=>a.id.localeCompare(b.id)))histories.push({id:root.id,data:await messagePages(client,`${base}/threads/${root.id}`)})
+  for(const root of [...roots].sort((a,b)=>a.id.localeCompare(b.id)))histories.push({id:root.id,data:stableMessages(await messagePages(client,`${base}/threads/${root.id}`))})
   const artifacts=await client.projectRequest(`${base}/artifacts?limit=50`),attachments=await client.projectRequest(`${base}/attachments?limit=100`)
   for(const index of [artifacts,attachments])if(!Array.isArray(index?.data)||index.truncated===true||Number(index.total??index.data.length)>index.data.length)fail('Project output index is incomplete')
   const nativeReports=[]
@@ -95,7 +97,7 @@ export async function projectTransferStamp(client,projectId) {
     }
   }
   const settings=Object.fromEntries(['id','name','topic','icon','color','visibility','disabled_at','overview_session_id','channel_session_id','default_environment_id','context_sources'].map(key=>[key,channel[key]??null]))
-  return sha(canonical({settings,config:(await client.projectRequest(`${base}/config`))?.config,graph:roots.map(root=>({id:root.id,title:root.display_name??root.title??null,status:root.thread_status??null,resolvedAt:root.resolved_at??null,replies:root.reply_count??null,lastReplyAt:root.last_reply_at??null,bindings:(root.bound_sessions??[]).map(row=>wire(row.id)).sort()})).sort((a,b)=>a.id.localeCompare(b.id)),histories,timeline:await messagePages(client,`${base}/timeline`,{include_replies:'true',include_bound_session_rows:'true'}),sessions,memory:await memoryIndex(client,projectId),files:await libraryIndex(client,projectId),artifacts:artifacts.data,attachments:attachments.data,nativeReports:nativeReports.sort((a,b)=>a.id.localeCompare(b.id))}))
+  return sha(canonical({settings,config:(await client.projectRequest(`${base}/config`))?.config,graph:roots.map(root=>({id:root.id,title:root.display_name??root.title??null,status:root.thread_status??null,resolvedAt:root.resolved_at??null,replies:root.reply_count??null,lastReplyAt:root.last_reply_at??null,bindings:(root.bound_sessions??[]).map(row=>wire(row.id)).sort()})).sort((a,b)=>a.id.localeCompare(b.id)),histories,timeline:stableMessages(await messagePages(client,`${base}/timeline`,{include_replies:'true',include_bound_session_rows:'true'})),sessions,memory:await memoryIndex(client,projectId),files:await libraryIndex(client,projectId),artifacts:artifacts.data,attachments:attachments.data,nativeReports:nativeReports.sort((a,b)=>a.id.localeCompare(b.id))}))
 }
 async function frozenSource(client,id,disabledAt=null) {
   const channel=await pausedChannel(client,id,disabledAt)
@@ -114,7 +116,7 @@ async function frozenSource(client,id,disabledAt=null) {
   return{channel,roots,sessions}
 }
 
-// The move action reads the source through its separate login. A successful
+// Preparation reads the current Desktop source before sign-out. A successful
 // stage keeps the source paused; ordinary capture remains a read-only operation.
 export async function stageProjectTransfer(client,paths,projectId,output,{exportArtifact=null,report=()=>{}}={}) {
   const account=identity(client)
@@ -141,7 +143,7 @@ export async function stageProjectTransfer(client,paths,projectId,output,{export
       const missing=verified.manifest.missing.join(' ')
       if(missing.includes('PROJECT_REPORT_LOCKED'))fail('The source project is paused. Unlock the Mac, keep Claude open in the source account, and prepare the project again.')
       if(missing.includes('PROJECT_REPORT_ACCESSIBILITY'))fail('The source project is paused. Enable Claude Transplant Resume in System Settings > Privacy & Security > Accessibility, then prepare the project again.')
-      if(missing.includes('PROJECT_REPORT_UNAVAILABLE'))fail('The source project is paused. A current report could not be read and checked. Use Connect source in Transplant, then retry Move and resume.')
+      if(missing.includes('PROJECT_REPORT_UNAVAILABLE'))fail('The source project is paused. A current report could not be read and checked. Keep the source account signed in and click Transplant again.')
       fail('The final project capture is incomplete. Keep the source paused and stage again.')
     }
     const final=await frozenSource(client,projectId,receipt.sourceDisabledAt)
