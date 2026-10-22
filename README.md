@@ -9,7 +9,7 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 Requires macOS 13 or later, Node.js 22 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`).
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.5
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.6
 claude-transplant-resume menubar
 ```
 
@@ -79,6 +79,52 @@ npm uninstall -g @miguelpieras/claude-transplant
 
 Removal stops the app and removes its login item. It retains local move metadata so removal cannot silently discard recovery state.
 
+## Prepare a Code Project for another account
+
+The CLI can capture a Code Project and prepare files for a rebuild in another account. These commands do not change the source project, sign out, create a destination project, send messages, or resume work. They are separate from the menu bar's local conversation mover.
+
+While signed into the source account in Claude Desktop, run:
+
+```sh
+claude-transplant-resume project-capture \
+  --project chan_PROJECT_ID \
+  --source ACCOUNT_UUID/ORGANIZATION_UUID \
+  --output /absolute/existing/private-parent/project-capture
+
+claude-transplant-resume project-verify \
+  --capture /absolute/existing/private-parent/project-capture
+
+claude-transplant-resume project-prepare \
+  --capture /absolute/existing/private-parent/project-capture \
+  --output /absolute/existing/private-parent/project-rebuild
+```
+
+Use a new output folder for each capture or preparation. Its parent must exist. The tool creates private directories and files and refuses symlink paths. Capture folders contain private conversation data. Keep them outside the repository and do not upload them to an issue.
+
+Capture reads the project settings, main conversation, thread list, each thread's messages and bound session history, shared memory, library files, attachments, and linked local transcripts. It matches local records by session ID, not title. It checks pagination, file hashes, and source changes. A failed read or a changing source produces an explicit incomplete capture. That capture is retained, but preparation refuses it. Repeat the capture into a new folder after the source is stable.
+
+Native report documents need a separate content export. Their viewer code does not contain the document text. Pass `--artifact-exports /absolute/private-folder` to use current text exports. That folder must be private and contain `<artifact-UUID>.txt` files and an `artifacts.json` file:
+
+```json
+{
+  "schemaVersion": 1,
+  "projectId": "chan_PROJECT_ID",
+  "artifacts": [{
+    "id": "ARTIFACT_UUID",
+    "file": "ARTIFACT_UUID.txt",
+    "format": "text",
+    "updatedAt": "2026-10-22T10:00:00Z",
+    "sha256": "SHA256_OF_TEXT_FILE"
+  }]
+}
+```
+
+The capture checks the export's file hash and source update time. It reports text exports as text and links, with native layout and widget state excluded. Missing or stale exports keep the capture incomplete. It never saves viewer access tokens.
+
+Preparation verifies every saved file and writes `restore-plan.json`, `RESTORE.md`, a main transcript, and a handoff for each thread. Original captured bytes remain available. The plan includes portable settings and file upload mappings, requires a paused destination, and permits no overwrites or automatic thread starts. Account-specific connections, environments, permissions, and device access require separate setup.
+
+This is project rebuild preparation, not a native history import. Claude does not currently support moving a project's threads to another project. The prepared files preserve history as reference; a destination would use new threads. The capture uses private Claude interfaces, which can change. Remote restore and automatic project creation are not implemented by these commands.
+
 ## Development and verification
 
 ```sh
@@ -89,7 +135,7 @@ swiftc -parse-as-library -typecheck menubar.swift workflow.swift
 npm pack --dry-run
 ```
 
-There are no runtime npm dependencies. `transplant.js` keeps the upstream engine and account discovery. `local-workflow.mjs` isolates collection selection, local moves, and recovery. `workflow.swift` holds the resume controls and native Accessibility operations. Tests use synthetic records and transcripts.
+There are no runtime npm dependencies. `transplant.js` keeps the upstream engine and account discovery. `local-workflow.mjs` isolates collection selection, local moves, and recovery. `project-source.mjs` reads Code Project data, and `project-workflow.mjs` verifies captures and prepares rebuild files. `workflow.swift` holds the resume controls and native Accessibility operations. Tests use synthetic records and transcripts.
 
 The local predecessor was tested with live moves and resumed conversations on macOS 15.7.9 and Claude Desktop 2.26454.2. The release checks cover synthetic fresh setup, moves, collisions, rollback, crash recovery, resume selection, packaging, and Swift compilation. Wider macOS and Claude Desktop compatibility is untested. Claude's local file format, log messages, and controls can change.
 

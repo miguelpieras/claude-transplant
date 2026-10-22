@@ -8,3 +8,5 @@ local-workflow.json
 local-workflow-pending.json
 identities.json
 menubar.json
+project-captures/
+project-preparations/

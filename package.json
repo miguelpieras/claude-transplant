@@ -1,6 +1,6 @@
 {
   "name": "@miguelpieras/claude-transplant",
-  "version": "4.1.3-resume.5",
+  "version": "4.1.3-resume.6",
   "description": "Move local Claude Desktop Code sessions to a verified Personal plan and resume interrupted work. Unofficial macOS beta.",
   "type": "module",
   "bin": {
@@ -10,6 +10,8 @@
     "transplant.js",
     "menubar.swift",
     "local-workflow.mjs",
+    "project-workflow.mjs",
+    "project-source.mjs",
     "workflow.swift",
     "transplant.test.js",
     "local-workflow.test.mjs"

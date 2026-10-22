@@ -45,6 +45,9 @@ const HELP = `claude-transplant-resume   move Claude Code history between accoun
   claude-transplant-resume local-plan  show the current destination and continuation candidates
   claude-transplant-resume local-move --restart-approved <token>  execute that local plan
   claude-transplant-resume local-status  check assistant activity after a resume attempt
+  claude-transplant-resume project-capture --project <chan_id> --source <account/org> --output <folder>  capture a project without changing it
+  claude-transplant-resume project-verify --capture <folder>  verify a saved project capture
+  claude-transplant-resume project-prepare --capture <folder> --output <folder>  prepare files for a project rebuild
 
   --from <match> --to <match>   skip the picker, match on email, org name, or uuid prefix
   --cloud                       reconcile active source, queue remaining local work and known source mirrors
@@ -930,6 +933,20 @@ export async function cloudClient(paths, expected = null, io = {}) {
     },
     eventRows,
     session,
+    projectRequest: (endpoint, options = {}) => {
+      if (!/^\/v1\/code\/(?:channels\/chan_[A-Za-z0-9]+(?:\/[A-Za-z0-9_:./-]+)?|memory\/channel\/chan_[A-Za-z0-9]+(?:\/[A-Za-z0-9_/-]+)?)(?:\?[^#]*)?$/.test(endpoint) || endpoint.includes('..')) throw new Error('Invalid project endpoint')
+      const method = options.method ?? 'GET'
+      if (method !== 'GET' && !(method === 'POST' && /\/files:(?:list|open)$/.test(endpoint))) throw new Error('Project capture permits read requests only')
+      return request(endpoint, { ...options, headers: { ...options.headers, 'anthropic-beta': 'ccr-byoc-2025-07-29', 'anthropic-client-feature': 'ccr' } })
+    },
+    projectArtifact: async (id) => {
+      if (!UUID.test(id ?? '')) throw new Error('Invalid project artifact ID')
+      const boot = await request(`/api/frame/${id}?org=${org}&bk=initial&actor=id&vt=1`,{headers:{'X-Frame-CP':'go','X-Frame-Surface':'standalone','X-Frame-Platform':'desktop'}})
+      const metadata={id,title:boot.title??'',version:boot.ver??null,updatedAt:boot.updated_at??null,kind:boot.kind??null,contentStore:boot.contentStore??null,typeSlug:boot.typeSlug??null}
+      // Runtime source files are not document content. Keep bootstrap tokens out
+      // of captures and require an explicit export of the actual document.
+      return {requiresContentExport:true,metadata}
+    },
     archive: (id) => request(`/v1/code/sessions/${wireRemoteId(id)}/archive`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
     unarchive: (id) => request(`/v1/code/sessions/${wireRemoteId(id)}/unarchive`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
   }
@@ -4170,6 +4187,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
   const script = path.join(app, 'Contents/Resources/transplant.js')
   await copyFile(path.join(HERE, 'transplant.js'), script)
   await copyFile(path.join(HERE, 'local-workflow.mjs'), path.join(app, 'Contents/Resources/local-workflow.mjs'))
+  for (const name of ['project-workflow.mjs', 'project-source.mjs']) await copyFile(path.join(HERE, name), path.join(app, 'Contents/Resources', name))
   await copyFile(path.join(HERE, 'package.json'), path.join(app, 'Contents/Resources/package.json'))
   const config = jsonText({ node: process.execPath, script })
   await writeFile(path.join(paths.state, 'menubar.json'), config)
@@ -4184,7 +4202,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
 }
 
 function parse(argv) {
-  const args = { from: [], to: null, cmd: null, dry: false, cloud: false, json: false, help: false, version: false, remove: false, snapshot: null, restartApproved: null, moveOnly: false, source: null, noResume: false, limitsOnly: false }
+  const args = { from: [], to: null, cmd: null, dry: false, cloud: false, json: false, help: false, version: false, remove: false, snapshot: null, restartApproved: null, moveOnly: false, source: null, noResume: false, limitsOnly: false, project: null, output: null, capture: null, artifactExports: null }
   const value = (i) => { if (argv[i] === undefined || argv[i].startsWith('-')) throw new Error(`${argv[i - 1]} needs a value`); return argv[i] }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -4194,6 +4212,10 @@ function parse(argv) {
     else if (a === '--cloud') args.cloud = true
     else if (a === '--move-only') args.moveOnly = true
     else if (a === '--source') args.source = value(++i)
+    else if (a === '--project') args.project = value(++i)
+    else if (a === '--output') args.output = value(++i)
+    else if (a === '--capture') args.capture = value(++i)
+    else if (a === '--artifact-exports') args.artifactExports = value(++i)
     else if (a === '--no-resume') args.noResume = true
     else if (a === '--limits-only') args.limitsOnly = true
     else if (a === '--restart-approved') args.restartApproved = value(++i)
@@ -4216,10 +4238,19 @@ function parse(argv) {
   if (args.cmd === 'restart' && incompatible) throw new Error('restart accepts only --json and --restart-approved')
   if (args.cmd === 'menubar' && (args.from.length || args.to || args.dry || args.cloud || args.json || (args.remove && args.snapshot))) throw new Error('menubar accepts only --remove or --snapshot <png>')
   if (args.cmd !== 'menubar' && (args.remove || args.snapshot)) throw new Error('--remove and --snapshot require menubar')
-  if (args.source !== null && args.cmd !== 'local-source') throw new Error('--source requires local-source')
+  if (args.source !== null && !['local-source','project-capture'].includes(args.cmd)) throw new Error('--source requires local-source or project-capture')
   if (args.cmd === 'local-source' && !args.source) throw new Error('local-source requires --source <account/org>')
   if (args.noResume && !['local-plan','local-move'].includes(args.cmd)) throw new Error('--no-resume requires local-plan or local-move')
   if (args.limitsOnly && (!['local-plan','local-move'].includes(args.cmd) || args.noResume)) throw new Error('--limits-only requires local-plan or local-move without --no-resume')
+  const projectCommand = ['project-capture','project-verify','project-prepare'].includes(args.cmd)
+  if (!projectCommand && (args.project || args.output || args.capture)) throw new Error('--project, --output, and --capture require a project command')
+  if (args.artifactExports && args.cmd!=='project-capture') throw new Error('--artifact-exports requires project-capture')
+  if (projectCommand) {
+    if (incompatible || args.restartApproved || args.moveOnly || args.noResume || args.limitsOnly) throw new Error('Project commands do not move or resume local conversations')
+    if (args.cmd === 'project-capture' && (!/^chan_[A-Za-z0-9]+$/.test(args.project ?? '') || !args.output || !new RegExp(`^${UUID_PATTERN}/${UUID_PATTERN}$`,'i').test(args.source ?? '') || args.capture)) throw new Error('project-capture requires --project <chan_id> --source <account/org> --output <folder>')
+    if (args.cmd === 'project-verify' && (!args.capture || args.project || args.output)) throw new Error('project-verify requires only --capture <folder>')
+    if (args.cmd === 'project-prepare' && (!args.capture || !args.output || args.project)) throw new Error('project-prepare requires --capture <folder> --output <folder>')
+  }
   return args
 }
 
@@ -4233,6 +4264,32 @@ async function main(argv) {
   const paths = layout()
   const out = process.stdout
   const emit = (o) => out.write(`${JSON.stringify(o)}\n`)
+  if (['project-capture','project-verify','project-prepare'].includes(args.cmd)) {
+    const {writeCaptureBundle,verifyCaptureBundle,prepareProjectRestore} = await import('./project-workflow.mjs')
+    if (args.cmd === 'project-verify') {
+      const result = await verifyCaptureBundle(path.resolve(args.capture))
+      const summary = {ok:result.ok,complete:result.complete,path:result.path,source:result.manifest.source,threads:result.manifest.threads.length,missing:result.manifest.missing}
+      if (!summary.complete) process.exitCode = 1
+      return args.json ? emit(summary) : out.write(`${summary.complete ? 'Complete capture verified' : 'Incomplete capture verified'} | ${summary.threads} threads | ${summary.path}\n${summary.missing.map(value=>`  ${value}\n`).join('')}`)
+    }
+    if (args.cmd === 'project-prepare') {
+      const result = await prepareProjectRestore(path.resolve(args.capture),path.resolve(args.output))
+      const summary = {ok:true,path:result.path,threads:result.preparation.handoffs.length,nativeHistoryImport:false,autoResume:false,destinationChanged:false}
+      return args.json ? emit(summary) : out.write(`Project rebuild files prepared | ${summary.threads} thread handoffs | ${summary.path}\nNo destination was changed. No work was started.\n`)
+    }
+    const {collectProject,loadArtifactExports} = await import('./project-source.mjs')
+    const [account,org] = args.source.split('/')
+    const expected = {account,org,label:'the selected project source'}
+    const client = await cloudClient(paths,expected)
+    const report = message => args.json ? emit({stage:'project-capture',message}) : out.write(`${message}\n`)
+    const artifactExports = args.artifactExports ? await loadArtifactExports(path.resolve(args.artifactExports),args.project) : new Map()
+    const capture = await collectProject(client,paths,args.project,{report,artifactExports})
+    const result = await writeCaptureBundle(path.resolve(args.output),capture)
+    const verified = await verifyCaptureBundle(result.path)
+    const summary = {ok:verified.ok,complete:verified.complete,path:result.path,source:result.manifest.source,threads:result.manifest.threads.length,files:result.manifest.files.length,missing:result.manifest.missing,limitations:result.manifest.limitations??[]}
+    if (!summary.complete) process.exitCode = 1
+    return args.json ? emit(summary) : out.write(`${summary.complete ? 'Project captured and verified' : 'Partial project capture saved'} | ${summary.threads} threads | ${summary.path}\n${summary.missing.map(value=>`  ${value}\n`).join('')}`)
+  }
   if (['local-source','local-plan','local-move','local-status','local-identity'].includes(args.cmd)) {
     if (args.from.length || args.to || args.dry || args.cloud || args.moveOnly) throw new Error('Local workflow uses the verified signed-in Personal plan')
     const {runLocal} = await import('./local-workflow.mjs')

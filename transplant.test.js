@@ -1954,6 +1954,52 @@ test('cloud identity retains verified cookie fallback for unknown Desktop state 
   assert.deepEqual(requested, ['/api/account'])
 })
 
+test('project capture transport is read-only and checks the response organization', async (t) => {
+  const h = await home(), requested = []
+  let responseOrg = h.org.P
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const endpoint = new URL(url).pathname
+    if (endpoint === '/api/account') return Response.json({ uuid: h.acct.P })
+    if (endpoint === '/api/organizations') return Response.json([{ uuid: h.org.P }])
+    requested.push({endpoint,method:options.method??'GET'})
+    assert.equal(options.headers['x-organization-uuid'],h.org.P)
+    assert.equal(options.headers['anthropic-beta'],'ccr-byoc-2025-07-29')
+    return Response.json({data:[]},{headers:{'anthropic-organization-id':responseOrg}})
+  })
+  const client = await cloudClient(h.paths,{account:h.acct.P,org:h.org.P,label:'Source'},{active:{state:'unknown'},cookies:new Map([['sessionKey','fixture']]),userAgent:'fixture'})
+  await client.projectRequest('/v1/code/channels/chan_fixture/threads?limit=200')
+  await client.projectRequest('/v1/code/channels/chan_fixture/files:open',{method:'POST',body:'{"path":"file.md"}'})
+  for (const [endpoint,options] of [
+    ['https://example.com',{}],
+    ['/v1/code/channels/chan_fixture/../other',{}],
+    ['/v1/code/channels/chan_fixture',{method:'PATCH'}],
+    ['/v1/code/channels/chan_fixture/files:write',{method:'POST'}],
+    ['/v1/code/memory/channel/chan_fixture/memories',{method:'POST'}]
+  ]) assert.throws(()=>client.projectRequest(endpoint,options),/Invalid project endpoint|read requests only/)
+  assert.equal(requested.length,2)
+  responseOrg = h.org.T
+  await assert.rejects(client.projectRequest('/v1/code/channels/chan_fixture/config'),/organization changed/)
+})
+
+test('project artifact reads return safe metadata rather than viewer tokens or runtime files',async(t)=>{
+  const h=await home(),artifactId=id(999)
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    const endpoint=new URL(url).pathname
+    if(endpoint==='/api/account')return Response.json({uuid:h.acct.P})
+    if(endpoint==='/api/organizations')return Response.json([{uuid:h.org.P}])
+    assert.equal(endpoint,`/api/frame/${artifactId}`)
+    assert.equal(options.method??'GET','GET')
+    assert.equal(options.headers['X-Frame-CP'],'go')
+    return Response.json({title:'Report',ver:'revision',updated_at:'2026-10-22T10:00:00Z',contentStore:'pages',assetToken:'never-save-bootstrap',syncToken:'never-save-sync',files:['runtime.js']})
+  })
+  const client=await cloudClient(h.paths,{account:h.acct.P,org:h.org.P,label:'Source'},{active:{state:'unknown'},cookies:new Map([['sessionKey','fixture']]),userAgent:'fixture'})
+  const value=await client.projectArtifact(artifactId)
+  assert.equal(value.requiresContentExport,true)
+  assert.equal(value.metadata.title,'Report')
+  assert.equal(JSON.stringify(value).includes('never-save'),false)
+  assert.equal(Object.hasOwn(value,'files'),false)
+})
+
 async function home() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ct-home-'))
   const paths = layout(root)

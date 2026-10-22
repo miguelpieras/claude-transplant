@@ -1,0 +1,181 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {createHash} from 'node:crypto'
+import {mkdtemp, mkdir, realpath, rm, writeFile} from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import {collectProject,loadArtifactExports} from './project-source.mjs'
+import {writeCaptureBundle, verifyCaptureBundle} from './project-workflow.mjs'
+
+const ACCOUNT='11111111-1111-4111-8111-111111111111'
+const ORG='22222222-2222-4222-8222-222222222222'
+const PROJECT='chan_testProject'
+const THREAD='cmsg_testThread'
+const sha=value=>createHash('sha256').update(value).digest('hex')
+const clone=value=>JSON.parse(JSON.stringify(value))
+function fixture(overrides={}) {
+  const calls=[]
+  const root={id:THREAD,channel_id:PROJECT,thread_root_id:THREAD,reply_count:'1',last_reply_at:'2026-10-22T10:00:00Z',thread_status:'idle',bound_sessions:[{id:'cse_worker',title:'A thread'}]}
+  const index={sections:[{status:'idle',count:'1',data:[root]}],truncated:false}
+  const channel={id:PROJECT,name:'Founderizer',thread_count:'1',overview_session_id:'cse_coordinator',last_message_seq:'3',last_timeline_seq:'3'}
+  const memory='# Saved memory\n'
+  const client={account:ACCOUNT,org:ORG,
+    async projectRequest(endpoint,options={}) {
+      calls.push({endpoint,options})
+      const u=new URL(endpoint,'https://claude.ai'),suffix=u.pathname.replace(`/v1/code/channels/${PROJECT}`,'')
+      if(overrides.request){const v=await overrides.request(u,options,calls);if(v!==undefined)return clone(v)}
+      if(u.pathname===`/v1/code/memory/channel/${PROJECT}/memories`)return {data:[{id:'mem_saved',path:'/MEMORY.md',content_sha256:sha(memory)}],prefixes:[]}
+      if(u.pathname.endsWith('/memories/mem_saved'))return {content:memory,content_sha256:sha(memory)}
+      if(suffix==='')return {channel:clone(channel)}
+      if(suffix==='/config')return {config:{default_model:'model',limit_auto_continue:true}}
+      if(suffix==='/threads')return clone(index)
+      if(suffix==='/timeline')return {data:[{id:'cmsg_main',body:'Main conversation'}],has_more:false}
+      if(suffix===`/threads/${THREAD}`)return {data:[{id:THREAD,body:'Task'},{id:'cmsg_reply',body:'Done'}],has_more:false}
+      if(suffix==='/files:list')return {entries:[{path:'/result.txt',is_directory:false,size_bytes:6}]}
+      if(suffix==='/files:open')return {type:'text',content:'result',size_bytes:6}
+      if(suffix==='/artifacts'||suffix==='/attachments')return {data:[],truncated:false}
+      throw new Error('Unexpected synthetic request')
+    },
+    async session(id){return {id,title:id,created_at:'2026-10-22T10:00:00Z',access_token:'do not capture',session_context:{secret_key:'do not capture'}}},
+    async eventRows(id){if(overrides.events)return overrides.events(id);return [{event_type:'message',sequence_num:'1',payload:{type:'assistant',message:{content:`events for ${id}`}}}]}
+  }
+  return {client,calls,index,root,channel,memory}
+}
+
+test('collects source history, bytes and exact session IDs in a valid complete bundle',async()=>{
+  const {client,calls}=fixture(),capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.source.title,'Founderizer')
+  assert.deepEqual(capture.expectedThreadIds,[THREAD])
+  assert.equal(capture.threads[0].sessionEvents[0].id,'cse_worker')
+  assert.equal(capture.coordinator.sessionEvents[0].id,'cse_coordinator')
+  assert.equal(capture.memoryFiles[0].bytes.toString(),'# Saved memory\n')
+  assert.equal(capture.libraryFiles[0].bytes.toString(),'result')
+  assert.ok(Object.values(capture.complete).every(Boolean))
+  assert.deepEqual(capture.missing,[])
+  assert.equal(capture.threads[0].sessionEvents[0].metadata.access_token,undefined)
+  assert.equal(capture.threads[0].sessionEvents[0].metadata.session_context,undefined)
+  assert.ok(calls.every(call=>call.options.method!=='POST'||/files:(list|open)$/.test(call.endpoint)))
+  const dir=await realpath(await mkdtemp(path.join(os.tmpdir(),'project-source-')))
+  try{const result=await writeCaptureBundle(path.join(dir,'capture'),capture);assert.equal(result.complete,true);assert.equal((await verifyCaptureBundle(result.path)).complete,true)}finally{await rm(dir,{recursive:true,force:true})}
+})
+
+test('reads opaque cursors and all memory prefixes without a numeric first page',async()=>{
+  const {client,calls}=fixture({request(u){
+    if(u.pathname.endsWith('/timeline'))return u.searchParams.get('cursor')==='opaque-page'?{data:[{id:'cmsg_old'}],has_more:false}:{data:[{id:'cmsg_new'}],next_cursor:'opaque-page',has_more:true}
+    if(u.pathname.endsWith('/memories')){
+      assert.equal(u.searchParams.has('page'),false)
+      return u.searchParams.get('path_prefix')?{data:[],prefixes:[]}:{data:[],prefixes:['/notes/']}
+    }
+  }})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.deepEqual(capture.coordinator.history.data.map(row=>row.id),['cmsg_new','cmsg_old'])
+  assert.equal(capture.memoryFiles.length,0)
+  assert.ok(calls.some(call=>call.endpoint.includes('path_prefix=%2Fnotes%2F')))
+  assert.deepEqual(capture.missing,[])
+})
+
+test('fails closed on a repeated history cursor and missing worker events',async()=>{
+  const {client}=fixture({request(u){if(u.pathname.endsWith(`/threads/${THREAD}`))return {data:[{id:THREAD}],next_cursor:'same',has_more:true}},events(id){if(id==='cse_worker')throw new Error('transport detail must not appear');return []}})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.complete.threads,false)
+  assert.ok(capture.missing.some(row=>row.includes('history')))
+  assert.ok(capture.missing.some(row=>row.includes('events')))
+  assert.ok(capture.missing.every(row=>!row.includes('transport detail')))
+})
+
+test('reports changed source thread graph and memory without claiming completeness',async()=>{
+  let reads=0,mem=0
+  const {client}=fixture({request(u){
+    if(u.pathname.endsWith('/threads')){reads++;return {sections:[{status:'idle',count:'1',data:[{id:THREAD,thread_root_id:THREAD,reply_count:reads===1?'1':'2',bound_sessions:[]}]}],truncated:false}}
+    if(u.pathname.endsWith('/memories')){mem++;return {data:mem===1?[]:[{id:'mem_new',path:'/NEW.md',content_sha256:sha('new')}],prefixes:[]}}
+  }})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.complete.roots,false)
+  assert.equal(capture.complete.threads,false)
+  assert.equal(capture.complete.memory,false)
+  assert.ok(capture.missing.some(row=>row.includes('changed during capture')))
+})
+
+test('matches local transcripts by bridge ID and captures bytes without title matching',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'project-source-local-'))
+  const recordId='local_33333333-3333-4333-8333-333333333333',sessionId='44444444-4444-4444-8444-444444444444'
+  const paths={records:path.join(dir,'records'),pool:path.join(dir,'pool')},cwd='/source/repo',bytes=Buffer.from('{"type":"assistant","text":"source bytes"}\n')
+  try{
+    await mkdir(path.join(paths.records,ACCOUNT,ORG),{recursive:true})
+    await mkdir(path.join(paths.pool,'-source-repo'),{recursive:true})
+    await writeFile(path.join(paths.records,ACCOUNT,ORG,'local_55555555-5555-4555-8555-555555555555.json'),'{not valid JSON')
+    await writeFile(path.join(paths.records,ACCOUNT,ORG,`${recordId}.json`),JSON.stringify({sessionId:recordId,cliSessionId:sessionId,cwd,bridgeSessionIds:['cse_worker'],title:'Old title'}))
+    await writeFile(path.join(paths.pool,'-source-repo',`${sessionId}.jsonl`),bytes)
+    const {client}=fixture(),capture=await collectProject(client,paths,PROJECT)
+    assert.equal(capture.complete.localTranscripts,true)
+    assert.deepEqual(capture.localTranscripts,[{threadId:THREAD,recordId,sessionId,bytes}])
+  }finally{await rm(dir,{recursive:true,force:true})}
+})
+
+test('keeps empty real memory empty and marks unresolved artifact content as missing',async()=>{
+  const {client}=fixture({request(u){if(u.pathname.endsWith('/memories'))return {data:[],prefixes:[]};if(u.pathname.endsWith('/artifacts'))return {data:[{slug:'published-output',title:'Output'}],total:1,truncated:false}}})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.memoryFiles.length,0)
+  assert.equal(capture.complete.memory,true)
+  assert.equal(capture.complete.library,false)
+  assert.ok(capture.missing.some(row=>row.includes('content route is not supported')))
+})
+
+
+test('retries changed worker events once and ignores placeholder project counts',async()=>{
+  const {client,channel}=fixture();channel.thread_count='0';let workerReads=0,workerEvents=0
+  client.session=async id=>({id,last_event_at:id==='cse_worker'&&workerReads++>0?'new':'old'})
+  client.eventRows=async id=>[{payload:{message:id==='cse_worker'?`worker-${++workerEvents}`:'coordinator'}}]
+  const capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.complete.roots,true)
+  assert.equal(capture.complete.threads,true)
+  assert.equal(workerEvents,2)
+  assert.equal(capture.threads[0].sessionEvents[0].events[0].payload.message,'worker-2')
+})
+
+test('captures artifact hook bytes and every attached output reference',async()=>{
+  const {client}=fixture({request(u){
+    if(u.pathname.endsWith('/artifacts'))return {data:[{slug:'public-output',title:'Report'}],total:1,truncated:false}
+    if(u.pathname.endsWith(`/threads/${THREAD}`))return {data:[{id:THREAD,attached_outputs:[{id:'output1',filename:'report.txt'}]}]}
+    if(u.pathname.endsWith('/attached_outputs/output1'))return {type:'download',data:Buffer.from('output').toString('base64')}
+  }})
+  client.projectArtifact=async slug=>({bytes:Buffer.from('<html>artifact</html>'),metadata:{slug}})
+  const capture=await collectProject(client,{},PROJECT)
+  assert.equal(capture.complete.library,true)
+  assert.equal(capture.libraryFiles.find(row=>row.id==='artifact-public-output').bytes.toString(),'<html>artifact</html>')
+  assert.equal(capture.libraryFiles.find(row=>row.id==='output-output1').bytes.toString(),'output')
+})
+
+test('Pages reports require a current explicit content export and preserve its text limit',async()=>{
+  const id='77777777-7777-4777-8777-777777777777',updatedAt='2026-10-22T10:00:00Z',bytes=Buffer.from('Full report text and original links')
+  const {client}=fixture({request(u){
+    if(u.pathname.endsWith('/artifacts'))return {data:[{slug:id,title:'Report',updated_at:updatedAt}],total:1,truncated:false}
+    if(u.pathname.endsWith(`/threads/${THREAD}`))return {data:[{id:THREAD,attached_outputs:[{id:`${THREAD}.0`,kind:'frame',frame_slug:id},{kind:'link',href:'https://example.com'}]}]}
+  }})
+  client.projectArtifact=async()=>({requiresContentExport:true,metadata:{id,updatedAt,contentStore:'pages'}})
+  const absent=await collectProject(client,{},PROJECT)
+  assert.equal(absent.complete.library,false)
+  const stale=await collectProject(client,{},PROJECT,{artifactExports:new Map([[id,{bytes,updatedAt:'2026-10-21T10:00:00Z'}]])})
+  assert.equal(stale.complete.library,false)
+  const saved=await collectProject(client,{},PROJECT,{artifactExports:new Map([[id,{bytes,updatedAt}]])})
+  assert.equal(saved.complete.library,true)
+  assert.equal(saved.limitations.length,1)
+  assert.equal(saved.libraryFiles.find(file=>file.id===`artifact-${id}-text`).nativeStateCaptured,false)
+})
+
+test('artifact export loader rejects a different project, changed bytes, and path traversal',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'project-text-exports-'))
+  const id='77777777-7777-4777-8777-777777777777',file=`${id}.txt`,bytes=Buffer.from('Original report')
+  const manifest={schemaVersion:1,projectId:PROJECT,artifacts:[{id,file,format:'text',updatedAt:'2026-10-22T10:00:00Z',sha256:sha(bytes)}]}
+  try{
+    await writeFile(path.join(dir,file),bytes,{mode:0o600})
+    const save=()=>writeFile(path.join(dir,'artifacts.json'),JSON.stringify(manifest),{mode:0o600})
+    await save()
+    assert.equal((await loadArtifactExports(dir,PROJECT)).get(id).bytes.toString(),'Original report')
+    await assert.rejects(loadArtifactExports(dir,'chan_other'),/do not match/)
+    await writeFile(path.join(dir,file),'Changed')
+    await assert.rejects(loadArtifactExports(dir,PROJECT),/failed verification/)
+    manifest.artifacts[0].file='../report.txt';await save()
+    await assert.rejects(loadArtifactExports(dir,PROJECT),/Invalid artifact/)
+  }finally{await rm(dir,{recursive:true,force:true})}
+})
