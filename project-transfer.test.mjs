@@ -129,23 +129,27 @@ test('source edits during staging cannot produce a ready transfer',async t=>{
   await assert.rejects(stat(f.prepared),{code:'ENOENT'})
 })
 
-test('read-time worker timestamps do not block staging or change saved message bytes',async t=>{
+test('read-time worker fields do not block staging or change saved message bytes',async t=>{
   const f=await fixture(t),request=f.client.projectRequest
   let reads=0
   f.client.projectRequest=async(endpoint,...args)=>{
     const response=await request(endpoint,...args),pathname=new URL(endpoint,'https://claude.ai').pathname
-    if(pathname.endsWith('/timeline')||pathname.endsWith(`/threads/${THREAD}`))response.data=response.data.map(row=>({...row,thread_own_session_at:new Date(Date.parse(NOW)+ ++reads).toISOString()}))
+    if(pathname.endsWith('/timeline')||pathname.endsWith(`/threads/${THREAD}`))response.data=response.data.map(row=>({...row,thread_own_session_at:new Date(Date.parse(NOW)+ ++reads).toISOString(),...reads%2?{thread_own_session_id:'cse_worker'}:{}}))
     return response
   }
   const result=await f.stage()
   assert.equal(result.ready,true)
   assert.equal(result.transfer.sourceStamp,await projectTransferStamp(f.client,PROJECT))
   const capture=path.join(f.output,'capture'),manifest=JSON.parse(await readFile(path.join(capture,'manifest.json'),'utf8'))
+  const capturedMessages=[]
   for(const role of ['coordinator-history','thread-history']){
     const entry=manifest.files.find(file=>file.role===role),history=JSON.parse(await readFile(path.join(capture,entry.path),'utf8'))
     assert.ok(history.data.length)
     assert.ok(history.data.every(row=>Number.isFinite(Date.parse(row.thread_own_session_at))))
+    capturedMessages.push(...history.data)
   }
+  assert.ok(capturedMessages.some(row=>row.thread_own_session_id==='cse_worker'))
+  assert.ok(capturedMessages.some(row=>!Object.hasOwn(row,'thread_own_session_id')))
 })
 
 test('message content, attachments, session bindings, and status remain part of the source stamp',async t=>{
@@ -154,14 +158,20 @@ test('message content, attachments, session bindings, and status remain part of 
     let changed=false,reads=0
     f.client.projectRequest=async(endpoint,...args)=>{
       const response=await request(endpoint,...args)
-      if(new URL(endpoint,'https://claude.ai').pathname.endsWith(`/${route}`))response.data[0]={...response.data[0],thread_own_session_at:new Date(Date.parse(NOW)+ ++reads).toISOString(),...changed?{[field]:value}:{}}
+      if(new URL(endpoint,'https://claude.ai').pathname.endsWith(`/${route}`))response.data[0]={...response.data[0],thread_own_session_at:new Date(Date.parse(NOW)+ ++reads).toISOString(),...reads%2?{thread_own_session_id:'cse_worker'}:{},...changed?{[field]:value}:{}}
       return response
     }
     const before=await projectTransferStamp(f.client,PROJECT)
-    assert.equal(await projectTransferStamp(f.client,PROJECT),before,`${route}: timestamp only`)
+    assert.equal(await projectTransferStamp(f.client,PROJECT),before,`${route}: current-view worker fields only`)
     changed=true
     assert.notEqual(await projectTransferStamp(f.client,PROJECT),before,`${route}: ${field}`)
   }
+})
+
+test('coordinator session IDs remain part of the source stamp',async t=>{
+  const f=await fixture(t),before=await projectTransferStamp(f.client,PROJECT)
+  f.source.channel_session_id='cse_newCoordinator'
+  assert.notEqual(await projectTransferStamp(f.client,PROJECT),before)
 })
 
 test('the source stamp includes current native report content beyond the unchanged index',async t=>{

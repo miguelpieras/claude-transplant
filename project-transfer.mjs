@@ -74,8 +74,9 @@ async function messagePages(client,endpoint,query={}) {
   }
   fail('Project messages exceeded their page limit')
 }
-// Claude updates this worker timestamp on reads. It does not change the message.
-const stableMessages=rows=>rows.map(({thread_own_session_at,...message})=>message)
+// These current-view worker fields can change on reads without a message edit.
+// Actual session bindings remain in the message and project graph.
+const stableMessages=rows=>rows.map(({thread_own_session_at,thread_own_session_id,...message})=>message)
 export async function projectTransferStamp(client,projectId) {
   identity(client)
   if(!CHANNEL.test(projectId??''))fail('A valid source project ID is required')
