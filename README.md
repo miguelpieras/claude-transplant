@@ -1,6 +1,6 @@
 # Claude Transplant Resume
 
-Move local Claude Desktop Code conversations to a verified Personal plan, then resume interrupted work.
+Move Claude Code projects and local conversations to a verified Personal plan, then resume interrupted work.
 
 **Unofficial macOS beta.** This is a fork of [Claude Transplant by Vitaliy Hayda](https://github.com/vitaliyhayda/claude-transplant), based on upstream 4.1.2. The original MIT license and copyright remain in [LICENSE](LICENSE).
 
@@ -9,7 +9,7 @@ Move local Claude Desktop Code conversations to a verified Personal plan, then r
 Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.8
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.9
 claude-transplant-resume menubar
 ```
 
@@ -19,10 +19,10 @@ The fork has its own command, app identity, and settings directory. Quit the ori
 
 ## Use
 
-1. Select the source account and plan that hold your conversations. Click **Use these conversations**. This selects all local conversation records in that source, including records with no local transcript.
+1. Select the source account and plan that hold your work. Click **Use these conversations**. This selects all local conversation records in that source, including records with no local transcript. All Code Projects from the source join the same move.
 2. Sign into the destination in **Claude Desktop** and select its **Personal Max or Personal Pro** plan. A terminal Claude Code login does not change the Desktop account.
 3. Check the source, destination, and record count shown in the panel. New signed-in accounts can appear before they have any conversations. If an account shows only an ID, sign into it in Claude Desktop once so the app can read its name.
-4. Click **Move and resume**. Claude closes briefly, the local records move, and Claude opens again. Clear **Resume stopped conversations** for a move without continuation messages.
+4. Click **Move and resume**. The app reads and moves the latest projects, then moves the conversations. Claude closes briefly for the local move and opens again. Clear **Resume stopped conversations** for a move without continuation messages.
 5. Read the result and open **Details** for any conversation that needs attention.
 
 The app shows **Checking account…** while it reads and verifies your Claude login. Move and resume are unavailable during this check. A failed account check is reported separately from a verified plan that is not Personal Max or Pro.
@@ -81,27 +81,24 @@ Removal stops the app and removes its login item. It retains local move metadata
 
 ## Transfer a Code Project in its latest state
 
-Select the project in the menu bar while signed into its source account. Use **Connect source** once to sign into that account in Transplant's separate login window. This keeps source access separate from the Claude Desktop login. No source preparation or Desktop account switch back is required.
+All Code Projects from the conversation source join the existing **Move and resume** action. The main panel shows the conversation and project counts. The app reads the full source project list on the click, so a project made after the last status check is included.
 
-When your allowance runs out, sign into the next Personal plan in Claude Desktop and click **Move and resume**. On that click, Transplant checks the destination, pauses the source project, waits for idle workers, and reads its current settings, memory, thread history, files, and native report state. It checks the source again before it creates the destination. Missing content, running workers, or source changes stop the transfer. An older capture is never substituted.
+When your allowance runs out, sign into the next Personal plan in Claude Desktop and click **Move and resume**. Transplant checks the destination, pauses each source project, requires idle workers, and reads its current settings, memory, thread history, files, and native report state. It checks the source again before it creates the destination. Missing content, running workers, or source changes stop the transfer. An older capture is never substituted.
 
 The transfer creates a new private project, uploads the current files and memory, and reads them back for verification. Native thread history cannot be imported: each thread and the main conversation are kept as reference files, indexed from project memory. With resume enabled, the app unpauses the new project and sends one coordinator request to continue unfinished work from those files. Acceptance of this request does not prove that a worker started or that its task finished. Clear **Resume stopped conversations** for a paused transfer with no continuation request.
 
-The project selection follows its new destination. Each source account needs its own **Connect source** login once. A saved connection can be used again while it remains valid. If it expires, reconnect it in Transplant; Desktop can stay on the destination. The source login is held in a separate macOS WebKit store for that account. The app stores only public connection metadata in its settings and uses source cookies in memory for requests.
+The project collection follows its new destination. New projects made there join the next move. Projects that were already in that destination before the move stay there, as with local conversations. Source access is kept in a separate macOS WebKit store for each account. If sign-in is needed, its window opens from the move action. Desktop can stay on the destination account. The app stores only public connection metadata in its settings and uses source cookies in memory for requests.
 
-An interrupted restore uses the same new project after a live source check. A continuation retry uses the same saved message ID. The source remains paused after a successful transfer.
+An interrupted move uses the same destination projects after live source checks. A continuation retry uses the same saved message ID. Empty, archived, and paused projects are copied without starting work. Sources remain paused after a successful transfer.
 
 The same flow is available in the CLI:
 
 ```sh
-claude-transplant-resume project-select \
-  --project chan_PROJECT_ID --source ACCOUNT_UUID/ORGANIZATION_UUID
-claude-transplant-resume project-connect
 # Switch accounts in Claude Desktop.
 claude-transplant-resume project-move
 ```
 
-`project-status --json` shows the selection and source connection. `project-move --no-resume` leaves the new project paused. `project-stage` remains an advanced manual capture command. Source and destination projects remain available. A transfer rebuilds the current state in a new project; it does not change ownership of the source project.
+`project-status --json` shows the source and all project counts. `project-move --no-resume` leaves the new projects paused. `project-select` and `project-stage` remain advanced commands for an explicit single-project capture. Source and destination projects remain available. A transfer rebuilds the current state in new projects; it does not change ownership of the source projects.
 
 ### Saved captures
 

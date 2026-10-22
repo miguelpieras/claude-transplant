@@ -31,6 +31,7 @@ struct ProjectPlan: Decodable {
         let name: String
     }
     let selected: Bool
+    let count: Int?
     let title: String?
     let projectId: String?
     let source: LocalAccount?
@@ -51,6 +52,7 @@ struct LocalResult: Decodable {
     let text: String?
     let paused: Bool?
     let accepted: Bool?
+    let count: Int?
 }
 struct ResumeStatus: Decodable {
     struct Row: Decodable {
@@ -91,7 +93,9 @@ extension Model {
 
     func refreshProjectWorkflow(force: Bool = false) {
         guard !projectRefreshing, !flowBusy else { return }
-        let identity = accounts.filter { $0.active == true }.map(\.id).joined(separator: ",")
+        let active = accounts.filter { $0.active == true }.map(\.id).joined(separator: ",")
+        let source = flowPlan.map { "\($0.from.account)/\($0.from.org)" } ?? ""
+        let identity = "\(active):\(source)"
         if !force, identity == projectRefreshIdentity, let checked = projectRefreshedAt, Date().timeIntervalSince(checked) < 60 { return }
         projectRefreshing = true
         projectRefreshIdentity = identity
@@ -103,54 +107,16 @@ extension Model {
             if status == 0, let data = output.data(using: .utf8), let plan = try? JSONDecoder().decode(ProjectPlan.self, from: data) {
                 projectPlan = plan
                 projectError = ""
-                if !plan.projects.contains(where: { $0.id == self.projectChoice }) { projectChoice = "" }
             } else {
                 projectPlan = nil
-                projectError = error.isEmpty ? "Could not check the project. Refresh before you move conversations." : error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
+                projectError = error.isEmpty ? "Could not check the projects. Refresh before you move." : error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
             }
         }
     }
 
-    func selectWorkflowProject() {
-        guard let current = projectPlan?.current, !projectChoice.isEmpty, !flowBusy, !flowChecking else { return }
-        runWorkflowProject(["project-select", "--source", "\(current.account)/\(current.org)", "--project", projectChoice, "--json"], success: "Project selected. Move and resume will read its latest state when you change accounts.")
-    }
-
-    func moveWorkflowProject() {
-        guard projectPlan?.canMove == true, !flowBusy, !flowChecking else { return }
-        var args = ["project-move", "--json"]
-        if !flowResume { args.append("--no-resume") }
-        runWorkflowProject(args, success: "Project transferred and paused.", projectMove: true)
-    }
-
-    func connectWorkflowProject() {
-        guard projectPlan?.selected == true, !flowBusy, !flowChecking else { return }
-        runWorkflowProject(["project-connect", "--json"], success: "Source connected. Move and resume will read its latest state after you change Desktop accounts.")
-    }
-
-    private func projectSummary(accepted: Bool) -> String {
-        accepted ? "Project transferred. Continuation request accepted." : "Project transferred and paused."
-    }
-
-    private func runWorkflowProject(_ args: [String], success: String, projectMove: Bool = false) {
-        flowBusy = true
-        running = true
-        flowActionError = ""
-        note = "Checking the project"
-        var result: LocalResult?
-        run(args, line: { [weak self] line in
-            guard let data = line.data(using: .utf8), let event = try? JSONDecoder().decode(LocalResult.self, from: data) else { return }
-            if let text = event.text { self?.note = text }
-            if event.done == true { result = event }
-        }) { [weak self] status, error in
-            guard let self else { return }
-            flowBusy = false
-            running = false
-            if status == 0, result?.ok == true { note = projectMove ? projectSummary(accepted: result?.accepted == true) : success }
-            else { flowActionError = error.isEmpty ? "The project operation did not finish. Refresh before retrying." : error }
-            projectRefreshedAt = nil
-            refreshWorkflow()
-        }
+    private func projectSummary(count: Int, accepted: Bool) -> String {
+        let projects = count == 1 ? "1 project" : "\(count) projects"
+        return accepted ? "Moved \(projects). Continuation requests accepted." : "Moved \(projects). The projects are paused."
     }
 
     func chooseWorkflowSource() {
@@ -181,51 +147,49 @@ extension Model {
         }
         if plan.moving && !limitsOnly {
             guard projectError.isEmpty, let project = projectPlan else {
-                flowActionError = "Check the project status before you move conversations."
+                flowActionError = projectError.isEmpty ? "The projects could not be checked. Refresh before you move." : projectError
                 refreshProjectWorkflow(force: true)
                 return
             }
-            if project.selected, let source = project.source, source.account != plan.to.account || source.org != plan.to.org {
-                guard project.canMove, let current = project.current, current.account == plan.to.account, current.org == plan.to.org else {
-                    flowActionError = project.note ?? "Connect the source account in the separate login window, then try Move and resume again."
-                    return
-                }
-                flowBusy = true
-                running = true
-                lines = []
-                note = "Reading and transferring the latest project state"
-                var result: LocalResult?
-                var projectArgs = ["project-move", "--json"]
-                if !flowResume { projectArgs.append("--no-resume") }
-                run(projectArgs, line: { [weak self] line in
-                    guard let data = line.data(using: .utf8), let event = try? JSONDecoder().decode(LocalResult.self, from: data) else { return }
-                    if let text = event.text { self?.note = text }
-                    if event.done == true { result = event }
-                }) { [weak self] status, error in
-                    guard let self else { return }
-                    guard status == 0, result?.ok == true else {
-                        flowBusy = false
-                        running = false
-                        flowActionError = error.isEmpty ? "The project transfer did not finish. Local conversations were left in place." : error
-                        projectRefreshedAt = nil
-                        refreshWorkflow()
-                        return
-                    }
-                    projectRefreshedAt = nil
-                    startLocalWorkflow(plan, limitsOnly: limitsOnly, projectMoved: true, projectResumed: result?.accepted == true)
-                }
+            guard let current = project.current, current.account == plan.to.account, current.org == plan.to.org else {
+                flowActionError = "The project source or destination changed. Refresh before you move."
                 return
             }
+            flowBusy = true
+            running = true
+            lines = []
+            note = "Reading and moving all projects"
+            var result: LocalResult?
+            var projectArgs = ["project-move", "--json"]
+            if !flowResume { projectArgs.append("--no-resume") }
+            run(projectArgs, line: { [weak self] line in
+                guard let data = line.data(using: .utf8), let event = try? JSONDecoder().decode(LocalResult.self, from: data) else { return }
+                if let text = event.text { self?.note = text }
+                if event.done == true { result = event }
+            }) { [weak self] status, error in
+                guard let self else { return }
+                guard status == 0, result?.ok == true else {
+                    flowBusy = false
+                    running = false
+                    flowActionError = error.isEmpty ? "The project transfer did not finish. Local conversations were left in place." : error
+                    projectRefreshedAt = nil
+                    refreshWorkflow()
+                    return
+                }
+                projectRefreshedAt = nil
+                startLocalWorkflow(plan, limitsOnly: limitsOnly, projectCount: result?.count ?? project.count ?? project.projects.count, projectResumed: result?.accepted == true)
+            }
+            return
         }
         startLocalWorkflow(plan, limitsOnly: limitsOnly)
     }
 
-    private func startLocalWorkflow(_ plan: LocalPlan, limitsOnly: Bool, projectMoved: Bool = false, projectResumed: Bool = false) {
+    private func startLocalWorkflow(_ plan: LocalPlan, limitsOnly: Bool, projectCount: Int = 0, projectResumed: Bool = false) {
         flowBusy = true
         flowAlreadyRunning = []
         running = true
         lines = []
-        if projectMoved { lines.append(("project", projectSummary(accepted: projectResumed))) }
+        if projectCount > 0 { lines.append(("projects", projectSummary(count: projectCount, accepted: projectResumed))) }
         badge = ""
         note = limitsOnly ? "Checking usage-limit errors" : plan.moving ? "Checking the destination" : "Checking stopped conversations"
         var result: LocalResult?
@@ -398,7 +362,16 @@ struct WorkflowPanel: View {
                 }
                 Text(plan.moving ? "TO" : "CURRENT PLAN").font(.caption).foregroundStyle(.secondary)
                 Text(plan.to.label ?? plan.to.account).font(.callout.weight(.semibold))
-                Text("\(plan.count) records · \(plan.resume.count) recent resume candidates").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("\(plan.count) conversations")
+                    Text("·")
+                    if let count = model.projectPlan?.count {
+                        Text(count == 1 ? "1 project" : "\(count) projects")
+                    } else {
+                        Text("All projects included")
+                    }
+                }.font(.caption).foregroundStyle(.secondary)
+                if !plan.resume.isEmpty { Text("\(plan.resume.count) recent resume candidates").font(.caption).foregroundStyle(.secondary) }
                 if !plan.moving { Text("Sign into another Personal plan in Claude to move there.").font(.caption).foregroundStyle(.secondary) }
                 Toggle("Resume stopped conversations", isOn: $model.flowResume).font(.caption).disabled(model.flowBusy)
                 if model.flowResume && !plan.resume.isEmpty { Text("Sends a Continue message to unfinished conversations active in the last 24 hours.").font(.caption).foregroundStyle(.secondary) }
@@ -413,7 +386,7 @@ struct WorkflowPanel: View {
                 ProgressView("Checking account…").controlSize(.small)
             }
             Divider()
-            ProjectWorkflowPanel().environmentObject(model)
+            if !model.flowChecking && !model.projectError.isEmpty { Text(model.projectError).font(.caption).foregroundStyle(.orange) }
             if !model.flowChecking && !model.flowError.isEmpty { Text(model.flowError).font(.caption).foregroundStyle(.orange) }
             if !model.flowActionError.isEmpty {
                 Text(model.flowActionError).font(.caption).foregroundStyle(.orange)
@@ -440,49 +413,6 @@ struct WorkflowPanel: View {
                 }
             }.font(.caption)
             HStack { Spacer();Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.plain).foregroundStyle(.secondary) }
-        }
-    }
-}
-
-struct ProjectWorkflowPanel: View {
-    @EnvironmentObject var model: Model
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Project").font(.callout.weight(.semibold))
-                Spacer()
-                Button("Refresh") { model.refreshProjectWorkflow(force: true) }
-                    .font(.caption).disabled(model.flowBusy || model.flowChecking)
-            }
-            if let project = model.projectPlan {
-                if project.selected {
-                    Text(project.title ?? "Selected project").font(.callout.weight(.semibold))
-                    if let source = project.source { Text("Source: \(source.label ?? source.account)").font(.caption).foregroundStyle(.secondary) }
-                    if let note = project.note { Text(note).font(.caption).foregroundStyle(.secondary) }
-                    if project.sourceConnected != true {
-                        Text("Connect once in a separate login window. Your Claude Desktop account stays selected.").font(.caption).foregroundStyle(.secondary)
-                        Button("Connect source") { model.connectWorkflowProject() }
-                            .disabled(model.flowBusy || model.flowChecking)
-                    }
-                    if project.canMove && model.flowPlan == nil {
-                        Toggle("Resume project coordinator", isOn: $model.flowResume).font(.caption).disabled(model.flowBusy)
-                        Text(model.flowResume ? "Threads and history are kept as reference files. The project coordinator continues from these files." : "Threads and history are kept as reference files. The new project stays paused.").font(.caption).foregroundStyle(.secondary)
-                        Button(model.flowResume ? "Move and resume" : "Move") { model.moveWorkflowProject() }
-                            .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking)
-                    }
-                } else if project.projects.isEmpty {
-                    Text(project.note ?? "No Code Projects were found in this account.").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Picker("Project", selection: $model.projectChoice) {
-                        Text("Select a project").tag("")
-                        ForEach(project.projects) { project in Text(project.name).tag(project.id) }
-                    }.disabled(model.flowBusy || model.flowChecking)
-                    Button("Select project") { model.selectWorkflowProject() }
-                        .disabled(model.projectChoice.isEmpty || model.flowBusy || model.flowChecking)
-                }
-            }
-            if !model.projectError.isEmpty { Text(model.projectError).font(.caption).foregroundStyle(.orange) }
-            if model.projectRefreshing { ProgressView("Checking project…").controlSize(.small) }
         }
     }
 }

@@ -74,6 +74,22 @@ test('reads opaque cursors and all memory prefixes without a numeric first page'
   assert.deepEqual(capture.missing,[])
 })
 
+test('an empty project needs no coordinator session but existing conversation work does',async()=>{
+  for(const empty of [true,false]){
+    const {client,channel}=fixture({request(u){
+      if(u.pathname.endsWith('/threads'))return{sections:[],truncated:false}
+      if(empty&&u.pathname.endsWith('/timeline'))return{data:[],has_more:false}
+    }})
+    delete channel.overview_session_id
+    client.session=async()=>assert.fail('An empty project has no session to read')
+    const capture=await collectProject(client,{},PROJECT)
+    assert.equal(capture.complete.coordinator,empty)
+    assert.deepEqual(capture.threads,[])
+    assert.deepEqual(capture.coordinator.sessionEvents,[])
+    if(!empty)assert.ok(capture.missing.some(value=>value.includes('coordinator session ID is missing')))
+  }
+})
+
 test('fails closed on a repeated history cursor and missing worker events',async()=>{
   const {client}=fixture({request(u){if(u.pathname.endsWith(`/threads/${THREAD}`))return {data:[{id:THREAD}],next_cursor:'same',has_more:true}},events(id){if(id==='cse_worker')throw new Error('transport detail must not appear');return []}})
   const capture=await collectProject(client,{},PROJECT)

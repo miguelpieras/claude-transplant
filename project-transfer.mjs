@@ -102,7 +102,7 @@ async function frozenSource(client,id,disabledAt=null) {
   const roots=rootsOf(await client.projectRequest(`/v1/code/channels/${id}/threads?limit=100`))
   const ids=[...new Set([channel.overview_session_id,channel.channel_session_id,...roots.flatMap(root=>root.bound_sessions.map(row=>row.id))].filter(Boolean))]
   const sessions=new Map()
-  if(!ids.length)fail('The project has no verified coordinator session')
+  if(!ids.length&&(roots.length||(await messagePages(client,`/v1/code/channels/${id}/timeline`,{include_replies:'true',include_bound_session_rows:'true'})).length))fail('The project has conversation work but no verified coordinator session')
   for(const sessionId of ids){
     if(!SESSION.test(sessionId))fail('The project has an invalid bound session')
     const response=await client.session(sessionId),session=response?.session??response
@@ -114,8 +114,8 @@ async function frozenSource(client,id,disabledAt=null) {
   return{channel,roots,sessions}
 }
 
-// Stage is the last source-account action before sign-out. A successful stage
-// keeps the source paused; ordinary capture remains a read-only operation.
+// The move action reads the source through its separate login. A successful
+// stage keeps the source paused; ordinary capture remains a read-only operation.
 export async function stageProjectTransfer(client,paths,projectId,output,{exportArtifact=null,report=()=>{}}={}) {
   const account=identity(client)
   if(!CHANNEL.test(projectId??''))fail('A valid source project ID is required')
@@ -150,9 +150,9 @@ export async function stageProjectTransfer(client,paths,projectId,output,{export
     const capturedSessions=[...capture.coordinator.sessionEvents,...capture.threads.flatMap(thread=>thread.sessionEvents)]
     if(final.sessions.size!==new Set(capturedSessions.map(session=>wire(session.id))).size||capturedSessions.some(session=>!same(final.sessions.get(wire(session.id)),stamp(session.metadata))))fail('A project session changed after capture. Keep the source paused and stage again.')
     const prepared=await prepareProjectRestore(saved.path,path.join(root,'prepared'))
-    Object.assign(receipt,{status:'ready',source:capture.source,sourceStamp,readyAt:new Date().toISOString(),manifestSha256:sha(await readPrivate(path.join(saved.path,'manifest.json'))),preparationSha256:sha(await readPrivate(path.join(prepared.path,'preparation.json')))})
+    Object.assign(receipt,{status:'ready',source:capture.source,sourceStamp,hasConversationWork:capture.coordinator.history.data.length>0||capture.threads.length>0||capturedSessions.length>0,readyAt:new Date().toISOString(),manifestSha256:sha(await readPrivate(path.join(saved.path,'manifest.json'))),preparationSha256:sha(await readPrivate(path.join(prepared.path,'preparation.json')))})
     await state(root,'transfer.json',receipt)
-    return{path:root,preparedPath:prepared.path,ready:true,source:receipt.source,threads:capture.threads.length,transfer:receipt}
+    return{path:root,preparedPath:prepared.path,ready:true,source:receipt.source,threads:capture.threads.length,hasConversationWork:receipt.hasConversationWork,transfer:receipt}
   }catch(error){receipt.status='blocked';receipt.failure='Stage did not finish. Keep the source paused and stage again.';await state(root,'transfer.json',receipt);throw error}
 }
 

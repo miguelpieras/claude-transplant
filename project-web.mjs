@@ -18,7 +18,7 @@ async function helper(paths,expected,connect,run=execute){
   try {
     const value=await run(binary(paths),[connect?'--project-source-connect':'--project-source-credentials','--account',expected.account,'--org',expected.org],{encoding:'utf8',timeout:connect?15*60*1000:60000,maxBuffer:1024*1024,windowsHide:true})
     result=JSON.parse(value.stdout)
-  }catch {fail(connect?'The source connection did not finish. Use Connect source and sign into that account.':'The source login could not be checked. Use Connect source in Transplant. Claude Desktop can stay on the destination account.')}
+  }catch {fail(connect?'The source sign-in did not finish. Retry Move and resume and sign in when asked.':'The source login could not be checked. Retry Move and resume and sign in when asked. Claude Desktop can stay on the destination account.')}
   if(!same(result,expected))fail('The source login belongs to another account or organization. No project was read.')
   return result
 }
@@ -32,9 +32,8 @@ export async function projectWebSource(paths,expected){
     return{available:true,account:value.account,org:value.org,email:value.email??null}
   }catch {return{available:false}}
 }
-export async function connectProjectWeb(paths,expected,{run}={}){
-  const file=location(paths,expected),result=await helper(paths,expected,true,run)
-  if(result.done!==true||result.ok!==true)fail('The source connection was not verified')
+async function saveMetadata(paths,expected,result){
+  const file=location(paths,expected)
   const metadata={version:1,account:expected.account,org:expected.org,email:typeof result.email==='string'?result.email:null,connectedAt:new Date().toISOString()}
   await mkdir(path.dirname(file),{recursive:true,mode:0o700})
   const parent=await lstat(path.dirname(file))
@@ -44,15 +43,24 @@ export async function connectProjectWeb(paths,expected,{run}={}){
   try {await rename(temporary,file)}finally{await unlink(temporary).catch(()=>{})}
   return{done:true,ok:true,account:expected.account,org:expected.org,email:metadata.email}
 }
+export async function connectProjectWeb(paths,expected,{run}={}){
+  location(paths,expected)
+  const result=await helper(paths,expected,true,run)
+  if(result.done!==true||result.ok!==true)fail('The source connection was not verified')
+  return saveMetadata(paths,expected,result)
+}
 export async function loadProjectWeb(paths,expected,{run}={}){
-  if(!(await projectWebSource(paths,expected)).available)fail('Use Connect source in Transplant once. Claude Desktop can stay on its current account.')
+  location(paths,expected)
   const result=await helper(paths,expected,false,run)
-  if(!Array.isArray(result.cookies)||result.cookies.length>1000)fail('The source web login is invalid')
+  if(result.done!==true||result.ok!==true||!Array.isArray(result.cookies)||result.cookies.length>1000)fail('The source web login is invalid')
   const cookies=new Map()
   for(const cookie of result.cookies){
     if(!cookie||!['claude.ai','.claude.ai'].includes(cookie.domain)||typeof cookie.name!=='string'||!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(cookie.name)||typeof cookie.value!=='string'||/[;\r\n\0]/.test(cookie.value)||cookie.path!=='/')continue
     cookies.set(cookie.name,cookie.value)
   }
-  if(!cookies.get('sessionKey'))fail('The source web login expired. Use Connect source in Transplant again.')
+  if(!cookies.get('sessionKey'))fail('The source web login expired. Retry Move and resume and sign in when asked.')
+  // The web session can outlive its original sign-in command. Recover only the
+  // public metadata after the helper has checked the live source identity.
+  if(!(await projectWebSource(paths,expected)).available)await saveMetadata(paths,expected,result)
   return{account:expected.account,org:expected.org,email:typeof result.email==='string'?result.email:null,cookies:[...cookies],...(typeof result.userAgent==='string'&&result.userAgent.length<1000&&!/[\r\n]/.test(result.userAgent)?{userAgent:result.userAgent}:{})}
 }

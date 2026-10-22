@@ -1,262 +1,312 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtemp,readFile,realpath,rm,mkdir,writeFile} from 'node:fs/promises'
+import {mkdtemp,mkdir,readFile,realpath,rm,writeFile} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {runProjectCommand} from './project-cli.mjs'
 
-const SOURCE={account:'11111111-1111-4111-8111-111111111111',org:'22222222-2222-4222-8222-222222222222',label:'Source'}
-const TARGET={account:'33333333-3333-4333-8333-333333333333',org:'44444444-4444-4444-8444-444444444444',label:'Target'}
-const THIRD={account:'55555555-5555-4555-8555-555555555555',org:'66666666-6666-4666-8666-666666666666',label:'Third'}
-const PROJECT='chan_source',STAMP='a'.repeat(64),DISABLED='2026-10-22T12:00:00Z'
+const A={account:'11111111-1111-4111-8111-111111111111',org:'22222222-2222-4222-8222-222222222222',label:'Source'}
+const B={account:'33333333-3333-4333-8333-333333333333',org:'44444444-4444-4444-8444-444444444444',label:'Target'}
+const C={account:'55555555-5555-4555-8555-555555555555',org:'66666666-6666-4666-8666-666666666666',label:'Next'}
+const PAUSED='2026-10-22T12:00:00Z'
 const json=(file,value)=>writeFile(file,JSON.stringify(value),{mode:0o600})
 const read=async file=>JSON.parse(await readFile(file,'utf8'))
-
-async function fixture(t) {
-  const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'project-cli-')))
+async function fixture(t,{sourceRows=2}={}){
+  const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'account-projects-')))
   t.after(()=>rm(root,{recursive:true,force:true}))
-  const paths={state:root},events=[],calls=[]
-  let active=SOURCE,latest='initial',sourceDisabledAt=DISABLED,sourceStamp=STAMP
-  const source={...SOURCE,projectRequest:async()=>({channel:{id:PROJECT,name:'Founderizer',disabled_at:sourceDisabledAt}})}
-  const selected=()=>read(path.join(root,'project-selection.json'))
-  const transfer=()=>({schemaVersion:1,kind:'claude-code-project-transfer',status:'ready',sourcePaused:true,sourceDisabledAt,sourceStamp,source:{accountId:SOURCE.account,organizationId:SOURCE.org,projectId:PROJECT},readyAt:'2026-10-22T12:05:00Z'})
-  const saveStage=async output=>{
-    await mkdir(output,{recursive:true,mode:0o700})
-    await mkdir(path.join(output,'prepared'),{mode:0o700})
-    const value=transfer()
-    await json(path.join(output,'transfer.json'),value)
-    await writeFile(path.join(output,'prepared','latest.txt'),latest,{mode:0o600})
-    return {ready:true,path:output,threads:6,transfer:value}
-  }
-  const io={
-    signedIn:async()=>active,
-    clientFactory:async(_paths,expected)=>{calls.push('destination-client');assert.equal(expected.account,active.account);return {...source,account:active.account,org:active.org}},
-    sourceFactory:async(_paths,expected)=>{calls.push('source-client');assert.deepEqual(expected,SOURCE);return source},
-    sourceMetadata:async(_paths,expected)=>{assert.deepEqual(expected,SOURCE);return {available:true,...SOURCE}},
-    connectSource:async(_paths,expected)=>{assert.deepEqual(expected,SOURCE);calls.push('connect-source');return SOURCE},
-    locked:async(_paths,work)=>work(),
-    accounts:async()=>{calls.push('verify-destination');return [{...active,active:true,identityKnown:true,personal:true}]},
-    stamp:async(client,id)=>{calls.push('source-stamp');assert.equal(client,source);assert.equal(id,PROJECT);return sourceStamp},
-    stage:async(client,_paths,id,output)=>{calls.push('stage');assert.equal(client,source);assert.equal(id,PROJECT);return saveStage(output)},
-    restore:async(client,prepared)=>{calls.push('restore');assert.equal(client.account,TARGET.account);assert.equal(await readFile(path.join(prepared,'latest.txt'),'utf8'),latest);return {restored:true,paused:true,projectId:'chan_newTarget'}},
-    resume:async(client,root)=>{calls.push('resume');assert.equal(client.account,TARGET.account);assert.equal(root,(await selected()).stagePath);return{accepted:true,coordinatorStarted:null}}
-  }
-  const run=(cmd,args={})=>runProjectCommand(paths,{cmd,...args},event=>events.push(event),io)
-  const select=()=>run('project-select',{source:SOURCE.account+'/'+SOURCE.org,project:PROJECT})
-  const ready=async()=>{
-    const stage=path.join(root,'stage-'+calls.length)
-    await saveStage(stage)
-    const value=await selected();value.stagePath=stage
-    await json(path.join(root,'project-selection.json'),value)
-    return stage
-  }
-  const interrupt=async()=>{
-    io.restore=async(client,prepared)=>{
-      calls.push('restore')
-      await json(path.join(path.dirname(prepared),'restore.json'),{schemaVersion:1,kind:'claude-code-project-restore',status:'restoring',source:transfer().source,destination:{accountId:client.account,organizationId:client.org,projectId:'chan_partial'},applied:[]})
-      throw new Error('Upload interrupted')
+  const paths={state:root},events=[],calls=[],projects=new Map([[A.account,[]],[B.account,[{id:'chan_targetExisting',name:'Existing target',body:'Keep this'}]],[C.account,[]]])
+  for(let i=1;i<=sourceRows;i++)projects.get(A.account).push({id:`chan_source${i}`,name:`Source ${i}`,body:`Current ${i}`,disabled_at:null})
+  let active=A,group={version:1,current:A,records:['local_fixture.json'],preserve:{}},nextId=0
+  const get=(account,id)=>projects.get(account).find(row=>row.id===id)
+  const stamp=(account,id)=>`${id}:${get(account,id).body}`
+  const client=account=>({...account,
+    async projectRequest(endpoint){
+      const url=new URL(endpoint,'https://claude.ai')
+      if(url.pathname==='/v1/code/channels'){calls.push(`list:${account.label}`);return{data:structuredClone(projects.get(account.account)),has_more:false}}
+      const id=url.pathname.split('/').at(-1),row=get(account.account,id)
+      assert.ok(row,'Unexpected project read '+endpoint)
+      return{channel:structuredClone(row)}
     }
-    await assert.rejects(run('project-move'),/Upload interrupted/)
-    return (await selected()).stagePath
+  })
+  const io={
+    collection:async()=>structuredClone(group),
+    signedIn:async()=>active,
+    accounts:async()=>{calls.push('verify-target');return[{...active,active:true,identityKnown:true,personal:true}]},
+    clientFactory:async(_paths,expected)=>{calls.push(`desktop:${expected.label}`);assert.equal(expected.account,active.account);return client(expected)},
+    sourceFactory:async(_paths,expected,options)=>{calls.push(`source:${expected.label}`);return client(expected)},
+    sourceMetadata:async(_paths,expected)=>({available:true,...expected}),
+    connectSource:async(_paths,expected)=>{calls.push('connect');return expected},
+    locked:async(_paths,work)=>work(),
+    stamp:async(source,id)=>stamp(source.account,id),
+    stage:async(source,_paths,id,output)=>{
+      calls.push(`stage:${id}`);const row=get(source.account,id);row.disabled_at=PAUSED
+      await mkdir(path.join(output,'prepared'),{recursive:true,mode:0o700})
+      const transfer={status:'ready',sourcePaused:true,sourceDisabledAt:PAUSED,sourceStamp:stamp(source.account,id),source:{accountId:source.account,organizationId:source.org,projectId:id}}
+      await json(path.join(output,'transfer.json'),transfer)
+      await json(path.join(output,'prepared','current.json'),{id,body:row.body})
+      return{path:output,ready:true,threads:1,transfer}
+    },
+    restore:async(destination,prepared)=>{
+      const captured=await read(path.join(prepared,'current.json'));calls.push(`restore:${captured.id}`)
+      const id=`chan_copy${++nextId}`
+      projects.get(destination.account).push({id,name:captured.id,body:captured.body,disabled_at:PAUSED,created_by_account_id:destination.account,created_at:PAUSED})
+      await json(path.join(path.dirname(prepared),'restore.json'),{status:'complete',verified:true,profile:{id,created_by_account_id:destination.account,created_at:PAUSED},destination:{accountId:destination.account,organizationId:destination.org,projectId:id}})
+      return{restored:true,paused:true,projectId:id}
+    },
+    resume:async(destination,stage)=>{
+      const restore=await read(path.join(stage,'restore.json'));calls.push(`resume:${restore.destination.projectId}`)
+      await json(path.join(stage,'resume.json'),{status:'complete'})
+      get(destination.account,restore.destination.projectId).disabled_at=null
+      return{accepted:true,coordinatorStarted:null}
+    }
   }
-  return {paths,io,events,calls,source,run,select,selected,ready,interrupt,setActive:value=>{active=value},setLatest:value=>{latest=value},setPaused:value=>{sourceDisabledAt=value},setStamp:value=>{sourceStamp=value}}
+  const run=(cmd,args={})=>runProjectCommand(paths,{cmd,...args},value=>events.push(value),io)
+  return{paths,io,events,calls,projects,run,get,state:()=>read(path.join(root,'account-projects.json')),setActive:value=>{active=value},setGroup:value=>{group=value},getGroup:()=>structuredClone(group)}
 }
 
-test('selects an exact project only in its verified source account',async t=>{
+test('status automatically includes every source project without a project selection or login action',async t=>{
   const f=await fixture(t)
-  await assert.rejects(f.run('project-select',{source:TARGET.account+'/'+TARGET.org,project:PROJECT}),/source account/)
-  await f.select()
-  assert.equal((await f.selected()).projectId,PROJECT)
-  assert.equal((await f.selected()).stagePath,null)
-})
-
-test('status permits a one-switch move using source metadata without loading its browser session',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  f.io.sourceFactory=async()=>assert.fail('Status must not load source credentials')
-  f.io.clientFactory=async()=>assert.fail('Selected status must not read a Desktop project')
+  f.io.sourceFactory=async()=>assert.fail('Current source uses its verified Desktop login')
+  f.io.connectSource=async()=>assert.fail('Status must not open a login')
+  f.io.locked=async()=>assert.fail('Status must not hold the move lock')
   await f.run('project-status')
   const status=f.events.at(-1)
-  assert.equal(status.canMove,true)
-  assert.equal(status.canStage,false)
-  assert.equal(status.sourceConnected,true)
-  assert.match(status.note,/latest source project state/)
-  assert.doesNotMatch(status.note,/prepare|switch back/i)
-  assert.equal((await f.selected()).stagePath,null)
+  assert.equal(status.count,2);assert.equal(status.allProjects,true);assert.equal(status.canMove,false)
+  assert.deepEqual(status.projects.map(row=>row.id),['chan_source1','chan_source2'])
+  assert.doesNotMatch(status.note,/select|Connect source/)
 })
 
-test('status requires the exact separate source login and keeps Desktop on its current account',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  for(const metadata of [{available:false},{available:true,...TARGET}]){
-    f.io.sourceMetadata=async()=>metadata
-    await f.run('project-status')
-    const status=f.events.at(-1)
-    assert.equal(status.canMove,false)
-    assert.equal(status.canStage,false)
-    assert.equal(status.sourceConnected,false)
-    assert.match(status.note,/Connect source once as Source/)
-    assert.match(status.note,/Desktop can stay/)
+test('one move reads all latest source projects and leaves existing destination projects alone',async t=>{
+  const f=await fixture(t);await f.run('project-status');f.setActive(B)
+  f.get(A.account,'chan_source1').body='Changed after the status check'
+  await f.run('project-move')
+  assert.equal(f.events.at(-1).projectCount,2)
+  assert.ok(f.projects.get(B.account).some(row=>row.body==='Changed after the status check'))
+  assert.equal(f.get(B.account,'chan_targetExisting').body,'Keep this')
+  assert.equal(f.calls.filter(row=>row.startsWith('stage:')).length,2)
+  assert.equal(f.calls.filter(row=>row.startsWith('resume:')).length,2)
+  assert.ok(f.calls.indexOf('verify-target')<f.calls.findIndex(row=>row.startsWith('source:')))
+  const state=await f.state()
+  assert.equal(state.current.account,B.account)
+  assert.deepEqual(state.preserve[`${B.account}/${B.org}`],['chan_targetExisting'])
+})
+
+test('the collection includes new projects on its next account and preserves projects already there',async t=>{
+  const f=await fixture(t);f.setActive(B);await f.run('project-move')
+  f.setGroup({...f.getGroup(),current:B})
+  f.projects.get(B.account).push({id:'chan_createdLater',name:'New work',body:'Later work',disabled_at:null})
+  f.setActive(C);await f.run('project-move')
+  assert.equal(f.events.at(-1).count,3)
+  assert.equal(f.projects.get(C.account).length,3)
+  assert.ok(f.projects.get(C.account).some(row=>row.body==='Later work'))
+  assert.equal(f.projects.get(C.account).some(row=>row.body==='Keep this'),false)
+})
+
+test('a partial batch retries each unfinished project without copying completed projects again',async t=>{
+  const f=await fixture(t);f.setActive(B)
+  const stage=f.io.stage;let failed=false
+  f.io.stage=async(...args)=>{if(args[2]==='chan_source2'&&!failed){failed=true;throw Error('Capture interrupted')}return stage(...args)}
+  await assert.rejects(f.run('project-move'),/Capture interrupted/)
+  assert.equal(f.projects.get(B.account).length,2)
+  f.get(A.account,'chan_source2').body='Latest after interruption'
+  await f.run('project-move')
+  assert.equal(f.projects.get(B.account).length,3)
+  assert.equal(f.calls.filter(row=>row==='restore:chan_source1').length,1)
+  assert.ok(f.projects.get(B.account).some(row=>row.body==='Latest after interruption'))
+})
+
+test('a lost coordinator start reply reuses the same restored destination',async t=>{
+  const f=await fixture(t,{sourceRows:1});f.setActive(B)
+  const resume=f.io.resume;let failed=false
+  f.io.resume=async(destination,stage)=>{
+    await json(path.join(stage,'resume.json'),{status:'pending'})
+    if(!failed){failed=true;throw Error('Start reply lost')}
+    return resume(destination,stage)
+  }
+  await assert.rejects(f.run('project-move'),/Start reply lost/)
+  await f.run('project-move')
+  assert.equal(f.calls.filter(row=>row.startsWith('restore:')).length,1)
+  assert.equal(f.calls.filter(row=>row.startsWith('stage:')).length,1)
+  assert.equal(f.events.at(-1).accepted,true)
+})
+
+test('a retry after the project phase finishes can continue local conversations without another project move',async t=>{
+  const f=await fixture(t);f.setActive(B);await f.run('project-move')
+  const before=f.calls.length
+  f.io.sourceFactory=async()=>assert.fail('No source login is needed for the finished project phase')
+  await f.run('project-move')
+  assert.equal(f.calls.length,before)
+  assert.equal(f.events.at(-1).alreadyCurrent,true)
+  assert.equal(f.events.at(-1).count,0)
+})
+
+test('a source project edit after its partial move blocks duplicate destination creation',async t=>{
+  const f=await fixture(t);f.setActive(B)
+  const stage=f.io.stage;let failed=false
+  f.io.stage=async(...args)=>{if(args[2]==='chan_source2'&&!failed){failed=true;throw Error('Interrupted')}return stage(...args)}
+  await assert.rejects(f.run('project-move'),/Interrupted/)
+  f.get(A.account,'chan_source1').body='Changed after this project was moved'
+  await assert.rejects(f.run('project-move'),/changed after a partial move/)
+  assert.equal(f.projects.get(B.account).length,2)
+})
+
+test('a non-Personal destination is refused before source access or project pause',async t=>{
+  const f=await fixture(t);f.setActive(B)
+  f.io.accounts=async()=>[{...B,active:true,identityKnown:true,personal:false}]
+  f.io.sourceFactory=async()=>assert.fail('No source access for a rejected target')
+  f.io.stage=async()=>assert.fail('No source pause for a rejected target')
+  await assert.rejects(f.run('project-move'),/Personal Max or Pro/)
+})
+
+test('missing source access and an incomplete destination index stop before project pause',async t=>{
+  for(const failure of ['source','destination']){
+    const f=await fixture(t);f.setActive(B)
+    f.io.stage=async()=>assert.fail('Preflight must finish before any source pause')
+    if(failure==='source')f.io.sourceFactory=async()=>{throw Error('Source login unavailable')}
+    else{
+      const factory=f.io.clientFactory
+      f.io.clientFactory=async(...args)=>{const client=await factory(...args);client.projectRequest=async()=>({data:[],has_more:true});return client}
+    }
+    await assert.rejects(f.run('project-move'),failure==='source'?/Source login unavailable/:/list is incomplete/)
   }
 })
 
-test('same-account status waits for the destination switch without a prepare action',async t=>{
-  const f=await fixture(t);await f.select();await f.run('project-status')
-  assert.equal(f.events.at(-1).canStage,false)
-  assert.equal(f.events.at(-1).canMove,false)
-  assert.match(f.events.at(-1).note,/When you change Desktop accounts/)
-})
-
-test('one Desktop switch captures the latest source state on the move click and ignores an old stage',async t=>{
-  const f=await fixture(t);await f.select();const previous=await f.ready()
-  f.setLatest('updated after the old capture')
-  f.setActive(TARGET)
+test('project discovery reads every page before pausing and captures every page result',async t=>{
+  const f=await fixture(t);f.setActive(B)
+  const factory=f.io.sourceFactory
+  f.io.sourceFactory=async(...args)=>{
+    const client=await factory(...args),request=client.projectRequest
+    client.projectRequest=async endpoint=>{
+      const url=new URL(endpoint,'https://claude.ai')
+      if(url.pathname!=='/v1/code/channels')return request(endpoint)
+      const rows=f.projects.get(A.account)
+      return url.searchParams.get('cursor')==='page-two'?{data:[structuredClone(rows[1])],has_more:false}:{data:[structuredClone(rows[0])],has_more:true,next_cursor:'page-two'}
+    }
+    return client
+  }
   await f.run('project-move')
-  assert.deepEqual(f.calls.slice(-6),['verify-destination','destination-client','source-client','stage','restore','resume'])
-  assert.equal(f.calls.filter(value=>value==='stage').length,1)
-  assert.notEqual(f.events.find(value=>value.text?.includes('latest project state')),undefined)
-  assert.equal(await readFile(path.join(previous,'prepared','latest.txt'),'utf8'),'initial')
-  assert.deepEqual(await f.selected(),{version:1,source:TARGET,projectId:'chan_newTarget',title:'Founderizer',stagePath:null})
-  assert.equal(f.events.at(-1).target.account,TARGET.account)
-  assert.equal(f.events.at(-1).accepted,true)
-  assert.equal(f.events.at(-1).paused,false)
+  assert.equal(f.events.at(-1).count,2)
 })
 
-test('move without resume leaves the verified project paused and sends no message',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
+test('a repeated project list cursor is refused before any pause',async t=>{
+  const f=await fixture(t);f.setActive(B)
+  f.io.sourceFactory=async()=>({...A,projectRequest:async endpoint=>({data:[],next_cursor:'repeated',has_more:true})})
+  f.io.stage=async()=>assert.fail('Incomplete source discovery must not pause projects')
+  await assert.rejects(f.run('project-move'),/cursor did not advance/)
+})
+
+test('a project added during the move joins that same account move',async t=>{
+  const f=await fixture(t,{sourceRows:1});f.setActive(B)
+  const stage=f.io.stage
+  f.io.stage=async(...args)=>{
+    const result=await stage(...args)
+    if(args[2]==='chan_source1')f.projects.get(A.account).push({id:'chan_addedDuringMove',name:'Added',body:'New state',disabled_at:null})
+    return result
+  }
+  await f.run('project-move')
+  assert.equal(f.events.at(-1).count,2)
+  assert.equal(f.projects.get(B.account).length,3)
+})
+
+test('an account with no projects still completes its project phase before local conversations',async t=>{
+  const f=await fixture(t,{sourceRows:0});f.setActive(B)
+  f.io.stage=async()=>assert.fail('There are no source projects to pause')
+  await f.run('project-move')
+  assert.equal(f.events.at(-1).count,0)
+  assert.equal((await f.state()).current.account,B.account)
+})
+
+test('paused and archived source projects keep their stopped state after transfer',async t=>{
+  const f=await fixture(t,{sourceRows:3});f.setActive(B)
+  f.get(A.account,'chan_source2').disabled_at=PAUSED
+  f.get(A.account,'chan_source3').archived_at=PAUSED
+  await f.run('project-move')
+  assert.equal(f.events.at(-1).count,3)
+  assert.equal(f.calls.filter(row=>row.startsWith('resume:')).length,1)
+})
+
+test('move-only transfers all projects without a coordinator continuation',async t=>{
+  const f=await fixture(t);f.setActive(B)
   f.io.resume=async()=>assert.fail('Move-only must not send a continuation')
   await f.run('project-move',{noResume:true})
   assert.equal(f.events.at(-1).paused,true)
   assert.equal(f.events.at(-1).accepted,false)
 })
 
-test('a failed project start keeps the staged transfer for the next attempt',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  f.io.resume=async()=>{throw new Error('The continuation is not verified')}
-  await assert.rejects(f.run('project-move'),/continuation is not verified/)
-  const selected=await f.selected()
-  assert.equal(selected.source.account,SOURCE.account)
-  assert.ok(selected.stagePath)
+test('a source connection can complete inside the main move flow without a selection',async t=>{
+  const f=await fixture(t)
+  f.io.locked=async()=>assert.fail('Interactive login must not hold the move lock')
+  await f.run('project-connect')
+  assert.equal(f.events.at(-1).sourceConnected,true)
+  assert.equal(f.events.at(-1).allProjects,true)
 })
 
-test('a pending start retries the same destination without restoring an unpaused project again',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  f.io.resume=async(_client,root)=>{
-    await json(path.join(root,'restore.json'),{status:'complete',destination:{accountId:TARGET.account,organizationId:TARGET.org,projectId:'chan_newTarget'}})
-    await json(path.join(root,'resume.json'),{status:'pending'})
-    throw new Error('Start reply lost')
-  }
-  await assert.rejects(f.run('project-move'),/Start reply lost/)
-  const staged=(await f.selected()).stagePath
-  f.io.restore=async()=>assert.fail('The unpaused destination must not be restored again')
-  f.io.resume=async(_client,root)=>{assert.equal(root,staged);return{accepted:true}}
-  await f.run('project-move')
-  assert.equal(f.calls.filter(value=>value==='stage').length,1)
-  assert.equal(f.events.at(-1).accepted,true)
-})
-
-test('a non-Personal destination is rejected before source credentials or source pause',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  f.io.accounts=async()=>[{...TARGET,active:true,identityKnown:true,personal:false}]
-  f.io.sourceFactory=async()=>assert.fail('Source credentials must not be loaded')
-  f.io.stage=async()=>assert.fail('Source must not be paused')
-  await assert.rejects(f.run('project-move'),/Personal Max or Pro/)
-  assert.equal((await f.selected()).stagePath,null)
-})
-
-test('a changed verified destination is rejected before any source action',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  f.io.clientFactory=async()=>({...f.source,...THIRD})
-  f.io.sourceFactory=async()=>assert.fail('Source credentials must not be loaded')
-  await assert.rejects(f.run('project-move'),/verified destination account changed/)
-})
-
-test('a mismatched separate source client cannot pause or capture the project',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  f.io.sourceFactory=async()=>({...f.source,...TARGET})
-  f.io.stage=async()=>assert.fail('A different source must not be paused')
-  await assert.rejects(f.run('project-move'),/separate source connection does not match/)
-  assert.equal((await f.selected()).stagePath,null)
-})
-
-test('a failed fresh capture clears an old unused stage and never restores its old data',async t=>{
-  const f=await fixture(t);await f.select();const previous=await f.ready();f.setActive(TARGET)
-  f.io.stage=async(_client,_paths,_id,output)=>{assert.notEqual(output,previous);throw new Error('Source changed during capture')}
-  f.io.restore=async()=>assert.fail('An old stage must not be restored')
-  await assert.rejects(f.run('project-move'),/Source changed during capture/)
-  assert.equal((await f.selected()).stagePath,null)
-})
-
-test('a partial restore resumes the same destination only after checking the live paused source',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  const stage=await f.interrupt()
-  f.io.stage=async()=>assert.fail('A partial destination must not get a new stage')
-  f.io.restore=async(client,prepared)=>{f.calls.push('restore');assert.equal(client.account,TARGET.account);assert.equal(prepared,path.join(stage,'prepared'));return {restored:true,paused:true,projectId:'chan_partial'}}
-  await f.run('project-move')
-  assert.equal(f.calls.filter(value=>value==='stage').length,1)
-  assert.equal(f.calls.filter(value=>value==='restore').length,2)
-  assert.equal(f.calls.filter(value=>value==='source-stamp').length,1)
-  assert.equal((await f.selected()).projectId,'chan_partial')
-})
-
-test('a changed or unpaused source blocks partial retry without a duplicate destination',async t=>{
-  for(const change of ['content','pause']){
-    const f=await fixture(t);await f.select();f.setActive(TARGET)
-    const stage=await f.interrupt()
-    if(change==='content')f.setStamp('b'.repeat(64));else f.setPaused(null)
-    f.io.stage=async()=>assert.fail('No new source stage may replace the partial restore')
-    f.io.restore=async()=>assert.fail('Changed source must not be restored into the old target')
-    await assert.rejects(f.run('project-move'),/source changed.*no duplicate project was created/i)
-    assert.equal((await f.selected()).stagePath,stage)
-    assert.equal(f.calls.filter(value=>value==='stage').length,1)
-  }
-})
-
-test('a partial restore cannot move to another destination or mutate the source again',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  await f.interrupt();f.setActive(THIRD)
-  f.io.sourceFactory=async()=>assert.fail('Wrong target must be rejected before source use')
-  await assert.rejects(f.run('project-move'),/restore belongs to another destination.*no duplicate project was created/i)
-})
-
-test('a Desktop account change during fresh capture stops before destination restore',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
+test('changing the Desktop target during a source capture stops before destination creation',async t=>{
+  const f=await fixture(t);f.setActive(B)
   const stage=f.io.stage
-  f.io.stage=async(...args)=>{const result=await stage(...args);f.setActive(THIRD);return result}
-  f.io.restore=async()=>assert.fail('The original destination must not be used after a Desktop account change')
-  await assert.rejects(f.run('project-move'),/destination changed during the project capture/)
-  assert.ok((await f.selected()).stagePath)
+  f.io.stage=async(...args)=>{const result=await stage(...args);f.setActive(C);return result}
+  f.io.restore=async()=>assert.fail('Changed Desktop target must not receive a project')
+  await assert.rejects(f.run('project-move'),/destination changed/)
+  assert.equal(f.projects.get(B.account).length,1)
+  assert.equal(f.projects.get(C.account).length,0)
 })
 
-test('advanced source staging still reads fresh state and invalidates a failed old stage',async t=>{
-  const f=await fixture(t);await f.select();const previous=await f.ready()
-  let calls=0
-  f.io.stage=async(client,_paths,id,output)=>{calls++;assert.equal(client.account,SOURCE.account);assert.equal(id,PROJECT);assert.notEqual(output,previous);assert.equal((await f.selected()).stagePath,null);throw new Error('Source changed during capture')}
-  await assert.rejects(f.run('project-stage'),/Source changed/)
-  assert.equal(calls,1)
-  assert.equal((await f.selected()).stagePath,null)
+test('a pending account batch cannot be redirected to a different Desktop account',async t=>{
+  const f=await fixture(t);f.setActive(B)
+  f.io.stage=async()=>{throw Error('Capture interrupted')}
+  await assert.rejects(f.run('project-move'),/Capture interrupted/)
+  f.setActive(C)
+  f.io.sourceFactory=async()=>assert.fail('Do not load source credentials for a redirected pending batch')
+  await assert.rejects(f.run('project-move'),/recorded destination/)
 })
 
-test('Connect source uses a separate source login from either Desktop account',async t=>{
-  for(const current of [SOURCE,TARGET]){
-    const f=await fixture(t);await f.select();f.setActive(current)
-    f.io.stage=async()=>assert.fail('Connection must not pause the source')
-    f.io.restore=async()=>assert.fail('Connection must not create a project')
-    f.io.locked=async()=>assert.fail('An interactive source login must not hold the move lock')
-    const before=await f.selected()
-    await f.run('project-connect')
-    assert.equal(f.calls.at(-1),'connect-source')
-    assert.equal(f.events.at(-1).sourceConnected,true)
-    assert.equal(f.events.at(-1).source.account,SOURCE.account)
-    assert.deepEqual(await f.selected(),before)
-    await f.run('project-status')
-    assert.equal(f.events.at(-1).sourceConnected,true)
+test('advanced single-project staging remains available without changing the all-project scope',async t=>{
+  const f=await fixture(t)
+  await f.run('project-select',{source:`${A.account}/${A.org}`,project:'chan_source1'})
+  await f.run('project-stage')
+  assert.equal(f.events.at(-1).sourcePaused,true)
+  await f.run('project-status')
+  assert.equal(f.events.at(-1).count,2)
+  assert.equal(f.events.at(-1).allProjects,true)
+})
+
+test('a missing or changed completed destination blocks a partial retry without a duplicate',async t=>{
+  for(const change of ['missing','owner']){
+    const f=await fixture(t);f.setActive(B)
+    const stage=f.io.stage;let failed=false
+    f.io.stage=async(...args)=>{if(args[2]==='chan_source2'&&!failed){failed=true;throw Error('Interrupted')}return stage(...args)}
+    await assert.rejects(f.run('project-move'),/Interrupted/)
+    if(change==='missing')f.projects.get(B.account).splice(1,1)
+    else f.projects.get(B.account)[1].created_by_account_id=A.account
+    await assert.rejects(f.run('project-move'),/destination project is missing or its owner changed/)
+    assert.equal(f.calls.filter(row=>row.startsWith('restore:')).length,1)
   }
 })
 
-test('a separate login for a different account is refused without changing the project selection',async t=>{
-  const f=await fixture(t);await f.select();f.setActive(TARGET)
-  const before=await f.selected()
-  f.io.connectSource=async()=>TARGET
-  await assert.rejects(f.run('project-connect'),/source login does not match/)
-  assert.deepEqual(await f.selected(),before)
-  assert.equal(f.events.some(event=>event.done===true&&event.sourceConnected===true),false)
+test('an empty project transfers without starting new conversation work',async t=>{
+  const f=await fixture(t,{sourceRows:1});f.setActive(B)
+  const stage=f.io.stage
+  f.io.stage=async(...args)=>({...await stage(...args),hasConversationWork:false})
+  f.io.resume=async()=>assert.fail('Empty project must not get a new task')
+  await f.run('project-move')
+  assert.equal(f.events.at(-1).count,1)
+  assert.equal(f.events.at(-1).accepted,false)
+  assert.equal(f.events.at(-1).paused,true)
+})
+
+test('a slow status read cannot erase an account move receipt written while it was reading',async t=>{
+  const f=await fixture(t)
+  const factory=f.io.clientFactory
+  const pending=path.join(f.paths.state,'project-batches','pending')
+  f.io.clientFactory=async(...args)=>{
+    const client=await factory(...args),request=client.projectRequest
+    client.projectRequest=async endpoint=>{
+      const result=await request(endpoint)
+      await json(path.join(f.paths.state,'account-projects.json'),{version:1,current:A,ids:[],preserve:{},pending,localAnchor:null})
+      return result
+    }
+    return client
+  }
+  await f.run('project-status')
+  assert.equal((await f.state()).pending,pending)
 })

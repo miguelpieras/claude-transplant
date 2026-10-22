@@ -48,11 +48,11 @@ const HELP = `claude-transplant-resume   move Claude Code history between accoun
   claude-transplant-resume project-capture --project <chan_id> --source <account/org> --output <folder>  capture a project without changing it
   claude-transplant-resume project-verify --capture <folder>  verify a saved project capture
   claude-transplant-resume project-prepare --capture <folder> --output <folder>  prepare files for a project rebuild
-  claude-transplant-resume project-status --json  show the selected project and transfer state
-  claude-transplant-resume project-select --project <chan_id> --source <account/org>  select a live project
-  claude-transplant-resume project-connect  connect the selected source once, independently of Claude Desktop
+  claude-transplant-resume project-status --json  show the source account and all its projects
+  claude-transplant-resume project-select --project <chan_id> --source <account/org>  select a project for an advanced manual capture
+  claude-transplant-resume project-connect  sign into the source independently of Claude Desktop
   claude-transplant-resume project-stage  manually pause and capture the selected source project
-  claude-transplant-resume project-move  read the latest source project, move it, and request continuation
+  claude-transplant-resume project-move  read all current source projects, move them, and request continuation
 
   --from <match> --to <match>   skip the picker, match on email, org name, or uuid prefix
   --cloud                       reconcile active source, queue remaining local work and known source mirrors

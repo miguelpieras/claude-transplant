@@ -256,7 +256,6 @@ final class Model: ObservableObject {
     var flowAlreadyRunning: Set<String> = []
     @Published var flowRefreshing = false
     @Published var projectPlan: ProjectPlan?
-    @Published var projectChoice = ""
     @Published var projectError = ""
     @Published var projectRefreshing = false
     var projectRefreshedAt: Date?

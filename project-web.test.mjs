@@ -35,7 +35,7 @@ test('each load checks the live private source and keeps its cookies in memory',
   let calls=0
   const value=await loadProjectWeb(paths,SOURCE,{run:async(_binary,args)=>{
     calls++;assert.equal(args[0],'--project-source-credentials')
-    return{stdout:JSON.stringify({...SOURCE,cookies:[{name:'sessionKey',value:'private-source-cookie',domain:'.claude.ai',path:'/'},{name:'foreign',value:'ignore',domain:'.example.test',path:'/'},{name:'injected',value:'unsafe; cookie',domain:'.claude.ai',path:'/'}]})}
+    return{stdout:JSON.stringify({...connected,cookies:[{name:'sessionKey',value:'private-source-cookie',domain:'.claude.ai',path:'/'},{name:'foreign',value:'ignore',domain:'.example.test',path:'/'},{name:'injected',value:'unsafe; cookie',domain:'.claude.ai',path:'/'}]})}
   }})
   assert.equal(calls,1)
   assert.deepEqual(value.cookies,[['sessionKey','private-source-cookie']])
@@ -48,11 +48,34 @@ test('a wrong source is refused before connection metadata is saved',async t=>{
   assert.equal((await projectWebSource(paths,SOURCE)).available,false)
 })
 
-test('a missing or expired source asks for Connect source without a Desktop switch',async t=>{
+test('a valid private source session recovers missing public metadata without a sign-in window',async t=>{
   const paths=await fixture(t)
-  await assert.rejects(loadProjectWeb(paths,SOURCE,{run:async()=>assert.fail('No credential request before connection')}),/Connect source/)
-  await connect(paths)
-  await assert.rejects(loadProjectWeb(paths,SOURCE,{run:async()=>({stdout:JSON.stringify({...SOURCE,cookies:[]})})}),/expired/)
+  assert.equal((await projectWebSource(paths,SOURCE)).available,false)
+  const result=await loadProjectWeb(paths,SOURCE,{run:async(_binary,args)=>{
+    assert.equal(args[0],'--project-source-credentials')
+    return{stdout:JSON.stringify({...connected,cookies:[{name:'sessionKey',value:'recovered-private-cookie',domain:'.claude.ai',path:'/'}]})}
+  }})
+  assert.deepEqual(result.cookies,[['sessionKey','recovered-private-cookie']])
+  assert.equal((await projectWebSource(paths,SOURCE)).available,true)
+  const [name]=await readdir(path.join(paths.state,'project-connections'))
+  const metadata=await readFile(path.join(paths.state,'project-connections',name),'utf8')
+  assert.equal(metadata.includes('recovered-private-cookie'),false)
+  assert.equal(metadata.includes('cookies'),false)
+})
+
+test('a wrong private source or expired session cannot create recovered metadata',async t=>{
+  const paths=await fixture(t)
+  await assert.rejects(loadProjectWeb(paths,SOURCE,{run:async()=>({stdout:JSON.stringify({...connected,account:SOURCE.org,cookies:[{name:'sessionKey',value:'foreign-cookie',domain:'.claude.ai',path:'/'}]})})}),/another account/)
+  assert.equal((await projectWebSource(paths,SOURCE)).available,false)
+  await assert.rejects(loadProjectWeb(paths,SOURCE,{run:async()=>({stdout:JSON.stringify({...connected,cookies:[]})})}),/expired.*Move and resume/)
+  assert.equal((await projectWebSource(paths,SOURCE)).available,false)
+})
+
+test('an unavailable private session asks for sign-in during Move and resume without opening a window',async t=>{
+  const paths=await fixture(t),modes=[]
+  await assert.rejects(loadProjectWeb(paths,SOURCE,{run:async(_binary,args)=>{modes.push(args[0]);throw new Error('Native session is unavailable')}}),/Retry Move and resume/)
+  assert.deepEqual(modes,['--project-source-credentials'])
+  assert.equal((await projectWebSource(paths,SOURCE)).available,false)
 })
 
 test('private helper output and errors do not appear in public errors',async t=>{

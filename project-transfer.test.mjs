@@ -100,6 +100,27 @@ test('running workers leave a paused source and a blocked stage, without capture
   await assert.rejects(stat(path.join(f.output,'capture')),{code:'ENOENT'})
 })
 
+test('empty projects transfer their files and memory without a coordinator or worker',async t=>{
+  const f=await fixture(t),request=f.client.projectRequest
+  delete f.source.overview_session_id;delete f.source.channel_session_id
+  f.client.projectRequest=async(endpoint,...args)=>endpoint.includes('/threads?')?{sections:[],truncated:false}:endpoint.includes('/timeline?')?{data:[],has_more:false}:request(endpoint,...args)
+  f.client.session=async()=>assert.fail('An empty project has no session')
+  const result=await f.stage()
+  assert.equal(result.ready,true)
+  assert.equal(result.hasConversationWork,false)
+  assert.equal(result.threads,0)
+  assert.equal((await restoreProjectTransfer(f.destination,f.prepared)).restored,true)
+  assert(f.target.files.get('result.bin').equals(f.file))
+})
+
+test('a missing coordinator cannot silently discard existing project conversation work',async t=>{
+  const f=await fixture(t),request=f.client.projectRequest
+  delete f.source.overview_session_id;delete f.source.channel_session_id
+  f.client.projectRequest=async(endpoint,...args)=>endpoint.includes('/threads?')?{sections:[],truncated:false}:request(endpoint,...args)
+  await assert.rejects(f.stage(),/conversation work but no verified coordinator/)
+  assert.equal(f.target.creates,0)
+})
+
 test('source edits during staging cannot produce a ready transfer',async t=>{
   const f=await fixture(t);f.sourceState.changed=true
   await assert.rejects(f.stage(),/changed during staging|capture is incomplete/)

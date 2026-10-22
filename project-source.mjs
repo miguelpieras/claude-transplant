@@ -153,7 +153,7 @@ export async function collectProject(client,paths,projectId,{report=()=>{},artif
     return value
   }
   const coordinatorIds=[...new Set([channel?.overview_session_id,channel?.channel_session_id].filter(Boolean))]
-  if(!coordinatorIds.length) miss('coordinator','coordinator session ID is missing')
+  if(!coordinatorIds.length&&(roots.length||capture.coordinator.history.data.length)) miss('coordinator','coordinator session ID is missing')
   for(const id of coordinatorIds){const value=await captureSession(id,'coordinator');if(value)capture.coordinator.sessionEvents.push(value)}
   const records=await attempt('localTranscripts','local session metadata',()=>localRecords(paths,client.account,client.org),[])
   const localTranscriptChecks=[]
