@@ -22,6 +22,7 @@ async function fixture(t,{sourceRows=2}={}){
   const get=(account,id)=>projects.get(account).find(row=>row.id===id)
   const stamp=(account,id)=>`${id}:${get(account,id).body}`
   const client=account=>({...account,
+    async projectAccess(){calls.push(`project-access:${account.label}`);return{available:true,readOnly:false}},
     async projectRequest(endpoint){
       const url=new URL(endpoint,'https://claude.ai')
       if(url.pathname==='/v1/code/channels'){calls.push(`list:${account.label}`);return{data:structuredClone(projects.get(account.account)),has_more:false}}
@@ -106,6 +107,33 @@ test('restoring after sign-out uses saved bytes without any source account acces
   assert.equal(calls.filter(row=>row.startsWith('restore:')).length,2)
   assert.equal(f.get(B.account,'chan_targetExisting').body,'Keep this')
   assert.ok(f.calls.indexOf('verify-local',before)<f.calls.findIndex((row,i)=>i>=before&&row.startsWith('restore:')))
+  assert.equal(calls.filter(row=>row==='project-access:Target').length,1)
+  assert.ok(calls.indexOf('project-access:Target')<calls.indexOf('verify-stage'))
+  assert.ok(calls.indexOf('project-access:Target')<calls.indexOf('verify-local'))
+  assert.ok(calls.indexOf('project-access:Target')<calls.indexOf('list:Target'))
+  assert.ok(calls.indexOf('project-access:Target')<calls.findIndex(row=>row.startsWith('restore:')))
+})
+
+test('unavailable, read-only, or unknown destination access blocks project binding and writes',async t=>{
+  const cases=[
+    {name:'read-only',access:async()=>({available:true,readOnly:true}),message:/Projects are read-only/},
+    {name:'unavailable',access:async()=>({available:false,readOnly:false}),message:/Projects are not available/},
+    {name:'unknown response',access:async()=>null,message:/Could not verify project access/},
+    {name:'missing field',access:async()=>({available:true}),message:/Could not verify project access/},
+    {name:'request failure',access:async()=>{throw Error('Access request failed')},message:/Could not verify project access/},
+    {name:'missing method',access:undefined,message:/Could not verify project access/}
+  ]
+  for(const row of cases)await t.test(row.name,async t=>{
+    const f=await fixture(t,{sourceRows:1});await f.prepare();f.setActive(B)
+    const before=await f.batch(),factory=f.io.clientFactory,start=f.calls.length
+    f.io.clientFactory=async(...args)=>({...await factory(...args),projectAccess:row.access})
+    f.io.verifyStage=async()=>assert.fail('Access refusal must not hash saved projects')
+    f.io.verifyLocal=async()=>assert.fail('Access refusal must not hash saved conversations')
+    await assert.rejects(f.run('project-move'),row.message)
+    assert.deepEqual(await f.batch(),before)
+    assert.equal(f.projects.get(B.account).length,1)
+    assert.equal(f.calls.slice(start).some(call=>call==='list:Target'||call.startsWith('restore:')||call.startsWith('resume:')),false)
+  })
 })
 
 test('status after the account switch reads only the saved local receipt',async t=>{
@@ -182,6 +210,7 @@ test('changed saved local or project bytes block all destination writes',async t
 test('ready status reads the receipt without hashing data and move rejects damaged bytes before writes',async t=>{
   const f=await fixture(t);await f.prepare();const batch=await f.batch()
   await json(path.join(batch.localPath,'local.json'),{source:A,count:3,body:'Changed'})
+  const factory=f.io.clientFactory
   f.setActive(B);f.io.clientFactory=async()=>assert.fail('Status must use only its receipt')
   const verifyLocal=f.io.verifyLocal,verifyStage=f.io.verifyStage
   f.io.verifyLocal=async()=>assert.fail('Status must not hash saved local files')
@@ -189,7 +218,7 @@ test('ready status reads the receipt without hashing data and move rejects damag
   await f.run('project-status')
   assert.equal(f.events.at(-1).ready,true)
   assert.equal(f.events.at(-1).canMove,true)
-  f.io.verifyLocal=verifyLocal;f.io.verifyStage=verifyStage
+  f.io.clientFactory=factory;f.io.verifyLocal=verifyLocal;f.io.verifyStage=verifyStage
   await assert.rejects(f.run('project-move'),/Saved local bytes changed/)
   assert.equal(f.projects.get(B.account).length,1)
 })
@@ -264,6 +293,20 @@ test('a partial destination restore retries without duplicating completed projec
   assert.equal(f.projects.get(B.account).length,3)
 })
 
+test('a partial restore checks current destination access before it continues',async t=>{
+  const f=await fixture(t);await f.prepare();f.setActive(B)
+  const restore=f.io.restore
+  f.io.restore=async(...args)=>{if((await read(path.join(args[1],'current.json'))).id==='chan_source2')throw Error('Upload interrupted');return restore(...args)}
+  await assert.rejects(f.run('project-move'),/Upload interrupted/)
+  const before=await f.batch(),start=f.calls.length,factory=f.io.clientFactory
+  assert.equal(before.projects[0].complete,true)
+  f.io.clientFactory=async(...args)=>({...await factory(...args),projectAccess:async()=>({available:true,readOnly:true})})
+  await assert.rejects(f.run('project-move'),/Projects are read-only/)
+  assert.deepEqual(await f.batch(),before)
+  assert.equal(f.projects.get(B.account).length,2)
+  assert.equal(f.calls.slice(start).some(call=>call.startsWith('restore:')||call.startsWith('resume:')),false)
+})
+
 test('a lost coordinator start response reuses the same restored project',async t=>{
   const f=await fixture(t,{sourceRows:1});await f.prepare();f.setActive(B)
   const resume=f.io.resume;let failed=false
@@ -301,6 +344,8 @@ test('new projects on the moved account join its next prepared copy and existing
 test('an account with zero projects still captures and restores its local conversations',async t=>{
   const f=await fixture(t,{sourceRows:0});await f.prepare()
   assert.equal(f.events.at(-1).count,0);assert.equal(f.events.at(-1).localCount,3)
+  const factory=f.io.clientFactory
+  f.io.clientFactory=async(...args)=>({...await factory(...args),projectAccess:async()=>assert.fail('Local conversations do not require cloud project access')})
   f.setActive(B);await f.run('project-move')
   assert.equal(f.events.at(-1).count,0);assert.equal(f.events.at(-1).localCount,3)
 })

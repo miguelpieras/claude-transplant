@@ -1954,6 +1954,67 @@ test('cloud identity retains verified cookie fallback for unknown Desktop state 
   assert.deepEqual(requested, ['/api/account'])
 })
 
+test('project access reads fresh destination Desktop settings and detects both read-only gates', async (t) => {
+  const h = await home(), requested = []
+  let values = [true, true, false, false]
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const endpoint = new URL(url)
+    if (endpoint.pathname === '/api/account') return Response.json({ uuid: h.acct.P })
+    if (endpoint.pathname === '/api/organizations') return Response.json([{ uuid: h.org.P }])
+    assert.equal(endpoint.pathname, `/edge-api/bootstrap/${h.org.P}/app_start`)
+    assert.equal(endpoint.search, '?statsig_hashing_algorithm=djb2&growthbook_format=sdk&include_system_prompts=false')
+    assert.equal(options.headers['x-organization-uuid'], h.org.P)
+    assert.equal(options.headers['anthropic-client-platform'], 'desktop_app')
+    assert.equal(options.method ?? 'GET', 'GET')
+    assert.equal(options.redirect, 'error')
+    requested.push(endpoint.pathname)
+    return Response.json({ account: { uuid: h.acct.P }, org_growthbook: { hashing_algorithm: 'djb2', features: Object.fromEntries(['942840715', '3671534883', '2573255674', '3573003813'].map((key, i) => [key, { defaultValue: values[i] }])) } })
+  })
+  const client = await cloudClient(h.paths, { account: h.acct.P, org: h.org.P, label: 'Destination' }, { active: { state: 'unknown' }, cookies: new Map([['sessionKey', 'fixture']]), userAgent: 'fixture' })
+  assert.deepEqual(await client.projectAccess(), { available: true, readOnly: false })
+  values = [true, true, true, false]
+  assert.deepEqual(await client.projectAccess(), { available: true, readOnly: true })
+  values = [true, true, false, true]
+  assert.deepEqual(await client.projectAccess(), { available: true, readOnly: true })
+  for (const unavailable of [[false, true, false, false], [true, false, false, false]]) {
+    values = unavailable
+    assert.deepEqual(await client.projectAccess(), { available: false, readOnly: false })
+  }
+  assert.equal(requested.length, 5)
+})
+
+test('project access rejects changed accounts and unknown or conditional settings', async (t) => {
+  const h = await home()
+  const good = () => ({ account: { uuid: h.acct.P }, org_growthbook: { hashing_algorithm: 'djb2', features: Object.fromEntries(['942840715', '3671534883', '2573255674', '3573003813'].map(key => [key, { defaultValue: false }])) } })
+  let body = good(), status = 200
+  t.mock.method(globalThis, 'fetch', async url => {
+    const endpoint = new URL(url).pathname
+    if (endpoint === '/api/account') return Response.json({ uuid: h.acct.P })
+    if (endpoint === '/api/organizations') return Response.json([{ uuid: h.org.P }])
+    return Response.json(body, { status })
+  })
+  const client = await cloudClient(h.paths, { account: h.acct.P, org: h.org.P, label: 'Destination' }, { active: { state: 'unknown' }, cookies: new Map([['sessionKey', 'fixture']]), userAgent: 'fixture' })
+  body.account.uuid = h.acct.T
+  await assert.rejects(client.projectAccess(), /account changed/)
+  body = good(); delete body.account
+  await assert.rejects(client.projectAccess(), /account changed/)
+  for (const change of [
+    value => { delete value.org_growthbook },
+    value => { value.org_growthbook.hashing_algorithm = 'changed' },
+    value => { delete value.org_growthbook.features['2573255674'] },
+    value => { value.org_growthbook.features['2573255674'].defaultValue = 'false' },
+    value => { value.org_growthbook.features['3573003813'].rules = [{ condition: { account: 'fixture' }, force: false }] },
+    value => { value.org_growthbook.features['942840715'].rules = null }
+  ]) {
+    body = good(); change(body)
+    await assert.rejects(client.projectAccess(), /could not be verified/)
+  }
+  body = good(); body.org_growthbook.features['942840715'].rules = []
+  assert.deepEqual(await client.projectAccess(), { available: false, readOnly: false })
+  status = 503
+  await assert.rejects(client.projectAccess(), /returned 503/)
+})
+
 test('project capture transport is read-only and checks the response organization', async (t) => {
   const h = await home(), requested = []
   let responseOrg = h.org.P

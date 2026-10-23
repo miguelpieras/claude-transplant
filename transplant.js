@@ -928,6 +928,19 @@ export async function cloudClient(paths, expected = null, io = {}) {
       email: account.email_address ?? account.email ?? null,
       organizations: organizations.map(item => ({ org: item.uuid, name: item.name ?? null, capabilities: item.capabilities ?? [] }))
     },
+    projectAccess: async () => {
+      const body = await request(`/edge-api/bootstrap/${org}/app_start?statsig_hashing_algorithm=djb2&growthbook_format=sdk&include_system_prompts=false`, { headers: { 'anthropic-client-platform': 'desktop_app' } })
+      if (body?.account?.uuid !== account.uuid) throw new Error('Claude Desktop account changed during the project access check')
+      const flags = body.org_growthbook
+      if (flags?.hashing_algorithm !== 'djb2') throw new Error('Claude project access settings could not be verified')
+      // These are the hashed feature keys used by Claude Desktop's Projects view.
+      const [heron, osprey, ptarmigan, hearth] = ['942840715', '3671534883', '2573255674', '3573003813'].map(key => {
+        const feature = flags.features?.[key]
+        if (typeof feature?.defaultValue !== 'boolean' || (feature.rules !== undefined && (!Array.isArray(feature.rules) || feature.rules.length))) throw new Error('Claude project access settings could not be verified')
+        return feature.defaultValue
+      })
+      return { available: heron && osprey, readOnly: hearth || (heron && osprey && ptarmigan) }
+    },
     list: async () => {
       const query = new URLSearchParams({ statuses: 'active', limit: '100' })
       query.append('statuses', 'paused')
@@ -4202,31 +4215,40 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
     }
     return `snapshot written | ${output}`
   }
-  const key = sha((await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE,'project-artifact-export.swift'),'utf8')) + (await readJson(path.join(HERE, 'package.json'))).version)
+  // Keep the native identity and macOS access grants for JavaScript-only updates.
+  const nativeSources = (await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE, 'project-artifact-export.swift'), 'utf8'))
+  const key = sha(nativeSources)
   const built = path.join(app, 'Contents/Resources/build.sha256')
-  if ((await readFile(built, 'utf8').catch(() => '')) !== key) {
+  const savedKey = await readFile(built, 'utf8').catch(() => '')
+  const installedInfo = await readFile(path.join(app, 'Contents/Info.plist'), 'utf8').catch(() => '')
+  const installedVersion = installedInfo.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/)?.[1]
+  const nativeMatches = savedKey === key || installedVersion && savedKey === sha(nativeSources + installedVersion)
+  const { version } = await readJson(path.join(HERE, 'package.json'))
+  const info = {
+    CFBundleIdentifier: LABEL,
+    CFBundleName: 'Claude Transplant Resume',
+    CFBundleExecutable: 'Claude Transplant Resume',
+    CFBundlePackageType: 'APPL',
+    CFBundleShortVersionString: version,
+    LSMinimumSystemVersion: '13.0',
+    LSUIElement: true,
+    NSHighResolutionCapable: true,
+    NSAppleEventsUsageDescription: 'Claude Transplant Resume closes and reopens Claude when you move your conversations.'
+  }
+  if (!nativeMatches || !(await stat(binary).catch(() => null))?.isFile()) {
     const fresh = `${app}.building`
     await rm(fresh, { recursive: true, force: true })
     await mkdir(path.join(fresh, 'Contents/MacOS'), { recursive: true })
     await mkdir(path.join(fresh, 'Contents/Resources'), { recursive: true })
-    const { version } = await readJson(path.join(HERE, 'package.json'))
-    const info = {
-      CFBundleIdentifier: LABEL,
-      CFBundleName: 'Claude Transplant Resume',
-      CFBundleExecutable: 'Claude Transplant Resume',
-      CFBundlePackageType: 'APPL',
-      CFBundleShortVersionString: version,
-      LSMinimumSystemVersion: '13.0',
-      LSUIElement: true,
-      NSHighResolutionCapable: true,
-      NSAppleEventsUsageDescription: 'Claude Transplant Resume closes and reopens Claude when you move your conversations.'
-    }
     await writeFile(path.join(fresh, 'Contents/Info.plist'), plist(info))
     compileMenubar(source, path.join(fresh, 'Contents/MacOS/Claude Transplant Resume'))
     await writeFile(path.join(fresh, 'Contents/Resources/build.sha256'), key)
     if (launch) stop()
     await rm(app, { recursive: true, force: true })
     await rename(fresh, app)
+  } else {
+    await writeFile(built, key)
+    await writeFile(path.join(app, 'Contents/Info.plist'), plist(info))
   }
   const script = path.join(app, 'Contents/Resources/transplant.js')
   await copyFile(path.join(HERE, 'transplant.js'), script)

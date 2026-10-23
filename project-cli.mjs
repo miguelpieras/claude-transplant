@@ -191,11 +191,18 @@ export async function runProjectCommand(paths,args,emit,io={}){
     if(same(active,batch.source))throw new Error('Ready to switch accounts. Sign into the destination Personal plan, then click Move and resume.')
     if(batch.target&&!same(batch.target,active))throw new Error('Finish the prepared move on its recorded destination. No duplicate project was created.')
     if(batch.noResume!==null&&batch.noResume!==!!args.noResume)throw new Error('Retry the prepared move with the same resume choice')
-    await verifySaved()
     const all=await(io.accounts??accounts)(paths,null,{verifyIdentity:true}),to=all.find(row=>row.active)
     if(!to?.identityKnown||!to.personal||!same(to,active))throw new Error('Select a verified Personal Max or Pro destination in Claude Desktop')
     const destination=await factory(paths,active)
     if(!same(destination,active))throw new Error('The verified destination account changed. No destination project was created.')
+    if(batch.projects.some(row=>!row.complete)){
+      const unknown='Could not verify project access for the destination account. No destination project was changed. Try again.'
+      let access;try{access=await destination.projectAccess?.()}catch{throw new Error(unknown)}
+      if(typeof access?.available!=='boolean'||typeof access?.readOnly!=='boolean')throw new Error(unknown)
+      if(!access.available)throw new Error('Projects are not available on this destination account. Choose an account with project access and retry. No destination project was changed.')
+      if(access.readOnly)throw new Error('Projects are read-only on this destination account. Choose an account with project access and retry. No destination project was changed.')
+    }
+    await verifySaved()
     if(!batch.target){batch.preserveTarget=(await listProjects(destination)).map(row=>row.id);batch.target=ref(to);batch.noResume=!!args.noResume;batch.phase='restoring';await saveBatch()}
     for(const row of batch.projects){
       await sameDesktop(active)

@@ -9,7 +9,7 @@ Move Claude Code projects and local conversations to a verified Personal plan, t
 Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.14
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.15
 claude-transplant-resume menubar
 ```
 
@@ -22,7 +22,7 @@ The fork has its own command, app identity, and settings directory. Quit the ori
 1. While signed into the source account in **Claude Desktop**, click **Transplant**. On first use, select **Use these conversations** in Accounts. This selects all local conversation records in that account and plan. All its Code Projects join the same move.
 2. Wait for **Ready to switch accounts**. The app pauses the source projects, saves their cloud data and the local conversations on this Mac, and checks the saved files. Keep the source signed in until this step is complete.
 3. Sign out of Claude Desktop. Sign into the destination and select its **Personal Max or Personal Pro** plan. A terminal Claude Code login does not change the Desktop account.
-4. Click **Move and resume**. The app restores the saved projects and moves the local conversation records. Claude closes briefly for the local move and opens again. Clear **Resume stopped conversations** to move without continuation messages.
+4. Click **Move and resume**. If projects need to be restored, the app first checks that the destination account can use and edit Projects. If access is blocked or cannot be verified, the move stops before it changes destination data. The app then restores the saved projects and moves the local conversation records. Claude closes briefly for the local move and opens again. Clear **Resume stopped conversations** to move without continuation messages.
 5. Read the result and open **Details** for any conversation that needs attention.
 
 The app shows **Checking account…** while it reads and verifies your Claude login. Move and resume are unavailable during this check. A failed account check is reported separately from a verified plan that is not Personal Max or Pro.
@@ -55,7 +55,7 @@ If the app is absent from the list, click **Open app folder** in its permission 
 
 macOS can also ask to let the app control Claude so it can close and reopen it. Enter a password only in the macOS prompt.
 
-The app is compiled locally and is not notarized. Rebuilding or updating it can invalidate an existing Accessibility grant. If resume stops working after an update, remove the old entry, add the app from the path above, and enable it again.
+The app is compiled locally and is not notarized. Updates that change only JavaScript or the version keep the native app binary and its Accessibility grant. Rebuilding the native app can invalidate that grant. If resume stops working after a native update, remove the old entry, add the app from the path above, and enable it again.
 
 ## Data and account checks
 
@@ -85,7 +85,7 @@ All Code Projects from the conversation source join the **Transplant** action. T
 
 When your allowance runs out, keep the source account signed into Claude Desktop and click **Transplant**. The app pauses each source project, requires idle workers, and saves its settings, memory, thread history, files, and native report state. It also saves the local conversations. It checks source consistency and the saved files before it shows **Ready to switch accounts**. Missing content, running workers, or source changes stop preparation. Keep the source signed in and retry if preparation fails.
 
-You can then sign out and sign into the next Personal plan. **Move and resume** checks the saved files and the destination account. It uses the saved source data without a source login or a source cloud request. Changes made after preparation are not part of that copy. To include later work, click **Transplant** again before you sign out.
+You can then sign out and sign into the next Personal plan. **Move and resume** checks the destination account's current Projects access before it checks saved files or changes destination data. A read-only, unavailable, or unverified destination stops the move. This check needs the destination's current Desktop login; it cannot check a signed-out account in advance. It uses the saved source data without a source login or a source cloud request. Changes made after preparation are not part of that copy. To include later work, click **Transplant** again before you sign out.
 
 The transfer creates a new private project, pauses it, uploads the saved files and memory, and reads them back for verification. Claude requires an active project for file uploads, so the transfer enables the new project for those uploads and pauses it again before final verification. It accepts only Claude’s automatic welcome messages as initial conversation data. If Claude made a default memory note, the app replaces it only when its saved content hash still matches. User messages, new threads, and changed destination data stop the restore. Native thread history cannot be imported: each thread and the main conversation are kept as reference files, indexed from project memory. With resume enabled, the app unpauses the new project and sends one coordinator request to continue unfinished work from those files. Acceptance of this request does not prove that a worker started or that its task finished. Clear **Resume stopped conversations** for a paused transfer with no continuation request.
 
