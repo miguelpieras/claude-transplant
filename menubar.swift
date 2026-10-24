@@ -255,12 +255,7 @@ final class Model: ObservableObject {
     @Published var flowBusy = false
     var flowAlreadyRunning: Set<String> = []
     @Published var flowRefreshing = false
-    @Published var projectPlan: ProjectPlan?
-    @Published var projectError = ""
-    @Published var projectRefreshing = false
-    var projectRefreshedAt: Date?
-    var projectRefreshIdentity = ""
-    var flowChecking: Bool { refreshing || flowRefreshing || projectRefreshing }
+    var flowChecking: Bool { refreshing || flowRefreshing }
     @Published var from: Set<String> = []
     @Published var to: String?
     @Published var excluded: Set<String> = []
@@ -455,7 +450,6 @@ final class Model: ObservableObject {
             let identity = current.map { "\($0.account)/\($0.org)" } ?? ""
             guard identity != activeIdentity else { return }
             flowPlan = nil
-            projectPlan = nil
             note = ""
             lines = []
             refresh()

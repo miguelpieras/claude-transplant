@@ -172,6 +172,30 @@ test('move retains exact records, missing-history records, orphan metadata and e
   assert.deepEqual((await readdir(f.dst)).filter(n=>n.startsWith('local_')),[name(20)])
 })
 
+test('local move ignores failed project captures and keeps shared history unchanged',async t=>{
+  for(const projectState of ['{invalid old project state',JSON.stringify({version:1,lastBatch:'/missing/failed-project-capture'})]) {
+    const f=await fixture(t),stateFile=path.join(f.paths.state,'account-projects.json')
+    await writeFile(stateFile,projectState,{mode:0o600})
+    const files=[f.history,f.sidecar,path.join(f.dst,name(20))]
+    const before=await Promise.all(files.map(file=>readFile(file,'utf8')))
+    const events=[],desktop=[]
+    await runLocal(f.paths,'local-move',f.plan.token,row=>events.push(row),{io:{
+      plan:()=>planLocal(f.paths,{allAccounts:[f.from,f.to]}),
+      quitDesktop:async()=>desktop.push('close'),
+      checkStopped:stopped,
+      openDesktop:async()=>desktop.push('open')
+    }})
+    assert.deepEqual(desktop,['close','open'])
+    assert.deepEqual(events.at(-1),{done:true,ok:true,moved:3,resume:f.plan.resume,target:f.plan.to})
+    assert.deepEqual(await Promise.all([10,11,12].map(n=>readFile(path.join(f.dst,name(n)),'utf8'))),f.original)
+    assert.deepEqual(await Promise.all(files.map(file=>readFile(file,'utf8'))),before)
+    assert.equal(await readFile(stateFile,'utf8'),projectState)
+    assert.equal((await collection(f.paths)).current.account,f.to.account)
+    assert.deepEqual((await readdir(f.src)).filter(n=>n.startsWith('local_')),[])
+    assert(!((await readdir(f.paths.state)).includes('local-workflow-pending.json')))
+  }
+})
+
 for(const collision of ['filename','session','deleted'])test(`refuses ${collision} collision before moving any record`,async t=>{
   const f=await fixture(t)
   if(collision==='filename')await put(path.join(f.dst,name(10)),{unrelated:true})

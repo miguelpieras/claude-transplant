@@ -279,7 +279,7 @@ async function quitDesktop(paths) {
   throw new Error('Claude did not stop within 25 seconds; no force quit was used')
 }
 
-export async function runLocal(paths,command,token,emit,{source=null,includeResume=true,limitsOnly=false}={}) {
+export async function runLocal(paths,command,token,emit,{source=null,includeResume=true,limitsOnly=false,io={}}={}) {
   if(command==='local-identity')return emit(await signedIn(paths))
   if(command==='local-plan') return emit(await planLocal(paths,{includeResume,limitsOnly}))
   if(command==='local-source')return locked(paths,async()=>emit(await selectSource(paths,source)))
@@ -295,15 +295,15 @@ export async function runLocal(paths,command,token,emit,{source=null,includeResu
     return emit({rows})
   }
   return locked(paths,async()=>{
-    const plan=await planLocal(paths,{includeResume,limitsOnly})
+    const plan=await(io.plan??planLocal)(paths,{includeResume,limitsOnly})
     if(plan.setup)throw new Error('Select the source account first')
     if(plan.token!==token)throw new Error('The account or session list changed. Refresh and try again.')
     if(plan.moving){
-      await (await import('./local-capture.mjs')).verifyLocalMoveCapture(paths,plan)
       emit({stage:'close',text:'Closing Claude briefly'})
-      await quitDesktop(paths)
-      try{if(plan.recovery)await recoverLocal(paths);emit({stage:'move',text:`Moving ${plan.count} records`});await moveRecords(paths,plan)}
-      finally{spawnSync('/usr/bin/open',['-a',paths.claudeApp],{encoding:'utf8'})}
+      await(io.quitDesktop??quitDesktop)(paths)
+      const moveOptions={checkStopped:io.checkStopped??assertDesktopStopped}
+      try{if(plan.recovery)await recoverLocal(paths,moveOptions);emit({stage:'move',text:`Moving ${plan.count} records`});await moveRecords(paths,plan,moveOptions)}
+      finally{await(io.openDesktop??(()=>spawnSync('/usr/bin/open',['-a',paths.claudeApp],{encoding:'utf8'})))(paths)}
     } else {
       const group=await collection(paths);group.resume=plan.resume;await atomic(path.join(paths.state,'local-workflow.json'),group)
     }
