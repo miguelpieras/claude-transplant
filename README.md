@@ -9,7 +9,7 @@ Move local Claude Code conversations to a verified Personal plan, then resume in
 Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.16
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.17
 claude-transplant-resume menubar
 ```
 
@@ -26,7 +26,7 @@ The fork has its own command, app identity, and settings directory. Quit the ori
 
 The menu bar flow moves local conversations directly. It does not copy or check cloud Projects. It needs no source capture or source login before the move. Old or failed project captures do not block it.
 
-The app shows **Checking account…** while it reads and verifies your Claude login. Move and resume are unavailable during this check. A failed account check is reported separately from a verified plan that is not Personal Max or Pro.
+The app shows **Checking account…** while it reads and verifies your Claude login. Move and resume are unavailable during this check. A failed account check is reported separately from a verified plan that is not Personal Max or Pro. After a failed account check, click Refresh to check the current login again.
 
 The collection follows its last destination. New conversations created there join the next move. Conversations that were already in a destination before the move stay there if you later move the collection away. **Accounts → Choose a different source** explicitly starts a new collection from all records in that account and plan.
 

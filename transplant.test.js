@@ -10,7 +10,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { accounts, cloudClient, executeMove, finishHeld, finishPending, finishWorkflow, inventory, keepLocal, layout, move, normalize, parseProcesses, receiptSummary, restartPlan, resumeLast, semantic, signedIn, step, sweep, undo, verifyPlaced, withDesktopRestart, writeNew } from './transplant.js'
+import { accounts, cloudClient, executeMove, finishHeld, finishPending, finishWorkflow, inventory, keepLocal, layout, move, normalize, parseProcesses, receiptSummary, refreshAccountIdentity, restartPlan, resumeLast, semantic, signedIn, step, sweep, undo, verifyPlaced, withDesktopRestart, writeNew } from './transplant.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const fixtureCommand = run => (file, ...args) => {
@@ -1890,6 +1890,56 @@ test('signed-in identity follows an offline switch without using network-depende
   await f.write(f.init() + f.event(1, `[LocalSessionManager] Org changed from ${h.org.P} to ${h.org.T}, reinitializing sessions`) + f.init(2, h.acct.P, h.org.T) + f.event(3, 'Failed to check allowlist status: offline'))
   assert.equal((await signedIn(h.paths, f.processes)).org, h.org.T)
   assert.equal(network.mock.callCount(), 0)
+})
+
+test('account identity retries immediately after a login check fails', async () => {
+  const h = await home(), f = await identityFixture(h)
+  const current = await signedIn(h.paths, f.processes), file = path.join(h.paths.state, 'identities.json')
+  let calls = 0
+  const io = { client: async (paths, selected) => {
+    assert.equal(paths, h.paths)
+    assert.equal(selected, current)
+    if (++calls === 1) throw new Error('Claude Desktop login is still updating')
+    return { identity: { account: current.account, email: 'ready@example.com', organizations: [{ org: current.org, capabilities: ['chat', 'claude_max'] }] } }
+  } }
+  await refreshAccountIdentity(h.paths, current, io)
+  const failed = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(failed.error, 'Claude Desktop login is still updating')
+  assert.equal(failed.attempt.account, current.account)
+  assert.equal(failed.accounts[current.account], undefined)
+  await refreshAccountIdentity(h.paths, current, io)
+  const verified = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(calls, 2)
+  assert.equal(verified.error, undefined)
+  assert.equal(verified.accounts[current.account].email, 'ready@example.com')
+  const active = (await accounts(h.paths, f.processes)).find(row => row.active)
+  assert.equal(active.identityKnown, true)
+  assert.equal(active.personal, true)
+})
+
+test('account identity rechecks a recent cached plan after a newer Desktop login', async () => {
+  const h = await home(), file = path.join(h.paths.state, 'identities.json')
+  const checkedAt = new Date(Date.now() - 60_000).toISOString()
+  const current = { account: h.acct.P, org: h.org.P, state: 'known', at: new Date(Date.now() - 30_000).toISOString() }
+  await mkdir(h.paths.state, { recursive: true })
+  await writeFile(file, JSON.stringify({
+    accounts: { [current.account]: { email: 'cached@example.com', checkedAt, organizations: [{ org: current.org, label: 'Personal Max', personal: true }] } },
+    attempt: { account: current.account, org: current.org, at: Date.now() }
+  }))
+  let calls = 0
+  const io = { client: async (_paths, selected) => {
+    assert.equal(selected, current)
+    calls++
+    return { identity: { account: current.account, email: 'fresh@example.com', organizations: [{ org: current.org, capabilities: ['chat', 'claude_pro'] }] } }
+  } }
+  await refreshAccountIdentity(h.paths, current, io)
+  const verified = JSON.parse(await readFile(file, 'utf8')).accounts[current.account]
+  assert.equal(calls, 1)
+  assert.equal(verified.email, 'fresh@example.com')
+  assert.equal(verified.organizations[0].label, 'Personal Pro')
+  assert.ok(Date.parse(verified.checkedAt) >= Date.parse(current.at))
+  await refreshAccountIdentity(h.paths, current, io)
+  assert.equal(calls, 1, 'a successful check remains cached until the next login or expiry')
 })
 
 test('Finish uses the active Desktop organization when its saved cookie still names the previous organization', async (t) => {

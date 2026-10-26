@@ -707,17 +707,16 @@ export function accountIdentity(identity) {
   return { email: identity.email, organizations, checkedAt: new Date().toISOString() }
 }
 
-export async function refreshAccountIdentity(paths, current) {
+export async function refreshAccountIdentity(paths, current, io = {}) {
   if (current.state !== 'known') return
   const file = path.join(paths.state, 'identities.json')
   const cache = await readJson(file).catch(() => ({ accounts: {} }))
   const known = cache.accounts?.[current.account]
   if (known?.organizations?.some(item => item.org === current.org) && Date.parse(known.checkedAt) >= Date.parse(current.at ?? 0) && Date.now() - Date.parse(known.checkedAt) < 300_000) return
-  if (cache.attempt?.account === current.account && cache.attempt.org === current.org && Date.now() - cache.attempt.at < 120_000) return
   cache.accounts ??= {}
   cache.attempt = { account: current.account, org: current.org, at: Date.now() }
   try {
-    const client = await cloudClient(paths, current)
+    const client = await (io.client ?? cloudClient)(paths, current)
     const identity = accountIdentity(client.identity)
     if (!identity.organizations.some(item => item.org === current.org)) throw new Error('Selected plan is not a Claude chat organization')
     cache.accounts[current.account] = identity
