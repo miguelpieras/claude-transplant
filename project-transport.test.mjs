@@ -44,7 +44,7 @@ test('large uploads keep the temporary grant in memory and write only to a new p
       assert.equal(options.headers.authorization,'Bearer temporary-fixture-grant')
       assert.equal(options.body instanceof FormData,true)
       assert.deepEqual(Buffer.from(await options.body.get('file').arrayBuffer()),bytes)
-      assert.equal(JSON.parse(options.body.get('params')).path,'/staged/fixture')
+      assert.equal(JSON.parse(await options.body.get('params').text()).path,'/staged/fixture')
     }
     if(endpoint.endsWith('/files:write'))assert.deepEqual(JSON.parse(options.body),{files:[{path:'history/current.jsonl',staged_upload_path:'/staged/fixture',overwrite:false}]})
   })
