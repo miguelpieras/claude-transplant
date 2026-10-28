@@ -135,7 +135,8 @@ export async function assertDesktopStopped(paths,records) {
   for (const file of await readdir(path.join(paths.home,'.claude/sessions')).catch(()=>[])) {
     const registration=await read(path.join(paths.home,'.claude/sessions',file),null).catch(()=>null)
     if (!registration || !ids.has(registration.sessionId)) continue
-    try {process.kill(registration.pid,0)} catch(error){if(error.code==='ESRCH')continue;throw error}
+    // EPERM: another user's process reused the PID of a worker that stopped without cleanup.
+    try {process.kill(registration.pid,0)} catch(error){if(['ESRCH','EPERM'].includes(error.code))continue;throw error}
     const matches=records.filter(row=>row.data.cliSessionId===registration.sessionId)
     if (matches.every(row=>row.data.isArchived===true && row.data.cwd!==registration.cwd)) {
       const opened=spawnSync('/usr/sbin/lsof',['-p',String(registration.pid),'-Fn'],{encoding:'utf8'}).stdout??''

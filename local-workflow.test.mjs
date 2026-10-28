@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import {mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
-import {spawnSync} from 'node:child_process'
+import childProcess, {spawnSync} from 'node:child_process'
 import {createHash} from 'node:crypto'
+import {syncBuiltinESMExports} from 'node:module'
 import {accountIdentity, accounts, cloudClient} from './transplant.js'
-import {collection, selectSource, planLocal, moveRecords, recoverLocal, resumeReason, runLocal} from './local-workflow.mjs'
+import {collection, selectSource, planLocal, moveRecords, recoverLocal, resumeReason, runLocal, assertDesktopStopped} from './local-workflow.mjs'
 
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
 const name=n=>`local_${uuid(n)}.json`
@@ -205,6 +206,20 @@ for(const collision of ['filename','session','deleted'])test(`refuses ${collisio
   await assert.rejects(moveRecords(f.paths,f.plan,{checkStopped:stopped}),/collision|already has/)
   assert.deepEqual(await readdir(f.dst),before)
   assert.deepEqual(await Promise.all([10,11,12].map(n=>readFile(path.join(f.src,name(n)),'utf8'))),f.original)
+})
+
+test('a stale worker registration whose PID another user reused does not block a move',async t=>{
+  const f=await fixture(t)
+  t.mock.method(childProcess,'spawnSync',()=>({status:0,stdout:'1 /sbin/launchd\n'}))
+  syncBuiltinESMExports()
+  t.after(()=>{t.mock.restoreAll();syncBuiltinESMExports()})
+  const rows=[{data:{cliSessionId:uuid(110),title:'Conversation 10'}}]
+  const register=pid=>put(path.join(f.paths.home,'.claude/sessions',`${pid}.json`),{pid,sessionId:uuid(110),cwd:'/Users/example/project'})
+  assert.throws(()=>process.kill(1,0),{code:'EPERM'},'launchd must belong to another user')
+  await register(1)
+  await assertDesktopStopped(f.paths,rows)
+  await register(process.pid)
+  await assert.rejects(assertDesktopStopped(f.paths,rows),/external Claude worker still uses Conversation 10/)
 })
 
 test('a failed move restores the source and leaves history unchanged',async t=>{

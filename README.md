@@ -9,7 +9,7 @@ Move local Claude Code conversations to a verified Personal plan, then resume in
 Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.17
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.18
 claude-transplant-resume menubar
 ```
 
