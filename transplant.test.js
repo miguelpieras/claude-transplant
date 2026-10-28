@@ -13,8 +13,11 @@ import { promisify } from 'node:util'
 import { accounts, cloudClient, executeMove, finishHeld, finishPending, finishWorkflow, inventory, keepLocal, layout, move, normalize, parseProcesses, receiptSummary, refreshAccountIdentity, restartPlan, resumeLast, semantic, signedIn, step, sweep, undo, verifyPlaced, withDesktopRestart, writeNew } from './transplant.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+// Fixtures see no running processes. Only tests that start real processes read the real list.
+let liveProcesses = false
 const fixtureCommand = run => (file, ...args) => {
   if (file === '/usr/bin/security') return { status: 1, stdout: '', stderr: 'fixture login unavailable' }
+  if (file === '/bin/ps' && !liveProcesses) return { status: 0, stdout: '', stderr: '' }
   if (['/usr/bin/osascript', '/usr/bin/open', '/bin/launchctl'].includes(file)) throw new Error('fixture native command requires a mock')
   return run(file, ...args)
 }
@@ -72,6 +75,7 @@ const branchEntries = (count, session, start) => Array.from({ length: count }, (
 const cli = (home, args) => promisify(execFile)(process.execPath, ['--input-type=module', '-e', `
   import childProcess from 'node:child_process'
   import { syncBuiltinESMExports } from 'node:module'
+  const liveProcesses = false
   childProcess.spawnSync = (${fixtureCommand.toString()})(childProcess.spawnSync)
   childProcess.spawn = (${fixtureCommand.toString()})(childProcess.spawn)
   syncBuiltinESMExports()
@@ -114,6 +118,7 @@ test('process identity separates Desktop descendants, external workers, and reus
 test('process inventory handles more than one megabyte of unrelated argv', async () => {
   const h = await home()
   const children = Array.from({ length: 9 }, () => spawn('/usr/bin/python3', ['-c', 'import time; time.sleep(30)', 'x'.repeat(120 * 1024)], { stdio: 'ignore' }))
+  liveProcesses = true
   try {
     await Promise.all(children.map((child) => once(child, 'spawn')))
     const listing = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 2000 })
@@ -122,6 +127,7 @@ test('process inventory handles more than one megabyte of unrelated argv', async
     const to = (await accounts(h.paths)).find((row) => row.account === h.acct.T)
     assert.equal((await inventory([], to, h.paths)).move.length, 0)
   } finally {
+    liveProcesses = false
     for (const child of children) child.kill('SIGTERM')
     await Promise.all(children.filter((child) => child.pid && child.exitCode === null && child.signalCode === null).map((child) => once(child, 'exit')))
   }
@@ -1071,12 +1077,14 @@ test('a non-Claude process mentioning a session id is not a worker', async () =>
     child.once('spawn', resolve)
     child.once('error', reject)
   })
+  liveProcesses = true
   try {
     const by = Object.fromEntries((await accounts(h.paths)).map((account) => [account.account, account]))
     const inv = await inventory([by[h.acct.P]], by[h.acct.Z], h.paths)
     assert.equal(inv.move.length, 1)
     assert.equal((await move(inv, by[h.acct.Z], h.paths)).ok, true)
   } finally {
+    liveProcesses = false
     child.kill()
     await once(child, 'exit')
   }
@@ -5063,6 +5071,7 @@ async function interruptTaskFamily(h, operation, stage) {
     import fs from 'node:fs/promises'
     import { syncBuiltinESMExports } from 'node:module'
     import { accounts, executeMove, layout, undo } from './transplant.js'
+    const liveProcesses = false
     childProcess.spawnSync = (${fixtureCommand.toString()})(childProcess.spawnSync)
     childProcess.spawn = (${fixtureCommand.toString()})(childProcess.spawn)
     const original = fs.${hook}
