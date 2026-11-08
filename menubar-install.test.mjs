@@ -13,7 +13,7 @@ import { layout, menubar } from './transplant.js'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const sha = value => createHash('sha256').update(value).digest('hex')
 
-async function installedApp(t, { savedVersion = '0.0.0-fixture', hashVersion = savedVersion, binaryExists = true } = {}) {
+async function installedApp(t, { savedVersion = '0.0.0-fixture', hashVersion = savedVersion, binaryExists = true, launch = null } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), 'ct-menubar-install-'))
   t.after(() => rm(home, { recursive: true, force: true }))
   const paths = layout(home)
@@ -29,6 +29,7 @@ async function installedApp(t, { savedVersion = '0.0.0-fixture', hashVersion = s
   await writeFile(path.join(resources, 'build.sha256'), sha(sources + hashVersion))
   let builds = 0
   t.mock.method(childProcess, 'spawnSync', (command, args) => {
+    if (launch && command !== 'swiftc') return launch(command, args)
     assert.equal(command, 'swiftc', 'launch:false must not run native app or launch commands')
     builds++
     writeFileSync(args[args.indexOf('-o') + 1], 'rebuilt native fixture')
@@ -63,6 +64,20 @@ test('legacy source hash is rejected when it does not match the installed versio
   assert.equal(f.builds(), 1)
   assert.equal(await readFile(f.binary, 'utf8'), 'rebuilt native fixture')
   assert.equal(await readFile(path.join(f.resources, 'build.sha256'), 'utf8'), sha(f.sources))
+})
+
+test('install loads the new app only after launchd removes the old one', async t => {
+  const calls = []
+  let unloading = 2
+  const f = await installedApp(t, { launch: (command, args) => {
+    calls.push(`${command} ${args[0]}`)
+    if (command === 'launchctl' && args[0] === 'print') return { status: unloading-- > 0 ? 0 : 113, stderr: '' }
+    if (command === 'launchctl' && args[0] === 'bootstrap' && unloading >= 0) return { status: 5, stderr: 'Bootstrap failed: 5: Input/output error' }
+    return { status: 0, stderr: '' }
+  } })
+  assert.match(await menubar(f.paths, false, null), /^menubar installed/)
+  assert.deepEqual(calls, ['launchctl bootout', 'pkill -x', 'launchctl print', 'launchctl print', 'launchctl print', 'launchctl bootstrap'])
+  assert.equal(await readFile(f.binary, 'utf8'), 'native identity fixture')
 })
 
 test('a matching legacy source hash cannot replace a missing native binary', async t => {

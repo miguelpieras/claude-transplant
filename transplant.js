@@ -4261,6 +4261,8 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
   stop()
   await mkdir(path.dirname(agent), { recursive: true })
   await writeFile(agent, plist({ Label: LABEL, ProgramArguments: [binary], RunAtLoad: true }))
+  // bootout can return before launchd removes the old service, and bootstrap fails with error 5 until it is gone.
+  await waitFor(() => spawnSync('launchctl', ['print', `${domain}/${LABEL}`]).status !== 0, performance.now() + 10_000)
   const load = spawnSync('launchctl', ['bootstrap', domain, agent], { encoding: 'utf8' })
   if (load.status !== 0) throw new Error(`launchctl failed: ${(load.stderr || '').trim()}`)
   return `menubar installed | starts at login | ${app}`
