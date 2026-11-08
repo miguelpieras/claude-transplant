@@ -70,6 +70,18 @@ export async function tailRows(info) {
   } finally {await handle.close()}
 }
 
+// A Desktop quit kills background tasks and queues their task notifications, but nothing delivers them.
+function queuedTaskResult(rows) {
+  const queue=[]
+  for (const row of rows) {
+    if (row.type!=='queue-operation') continue
+    if (row.operation==='enqueue') queue.push(row.content)
+    if (row.operation==='dequeue') queue.shift()
+    if (row.operation==='remove' && queue.includes(row.content)) queue.splice(queue.indexOf(row.content),1)
+  }
+  return queue.some(content=>/<task-notification>/.test(content??''))
+}
+
 export function resumeReason(record, rows, now=Date.now()) {
   if (record.isArchived || record.scheduledTaskId || !record.cliSessionId || now-(record.lastActivityAt??0)>24*3600_000) return null
   if (record.postTurnSummary?.needs_action?.trim()) return null
@@ -79,7 +91,8 @@ export function resumeReason(record, rows, now=Date.now()) {
   const conversation=rows.filter(row=>['user','assistant'].includes(row.type))
   const last=conversation.at(-1)
   if (!last) return null
-  if (last.type==='assistant') return last.message?.stop_reason==='tool_use' ? 'Interrupted tool call' : null
+  if (last.type==='assistant' && last.message?.stop_reason==='tool_use') return 'Interrupted tool call'
+  if (last.type==='assistant') return queuedTaskResult(rows.slice(rows.lastIndexOf(last)+1)) ? 'Pending task result' : null
   const content=last.message?.content
   const text=typeof content==='string'?content:JSON.stringify(content??'')
   if (/\[Request interrupted by user/.test(text)) return 'Interrupted turn'

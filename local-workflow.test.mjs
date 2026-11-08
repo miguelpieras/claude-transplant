@@ -300,6 +300,17 @@ test('resume selection excludes finished work and user decisions',()=>{
   assert.equal(resumeReason({...record,error:'Rate limit reached'},request),'Usage limit reached')
 })
 
+test('resume selection catches a task result that a Desktop quit left in the queue',()=>{
+  const record={cliSessionId:uuid(10),lastActivityAt:Date.now()}
+  const waiting={type:'assistant',message:{stop_reason:'end_turn',content:[{type:'text',text:'The tests run in the background.'}]}}
+  const notice='<task-notification>\n<task-id>b1</task-id>\n<status>killed</status>\n</task-notification>'
+  const queued={type:'queue-operation',operation:'enqueue',content:notice}
+  assert.equal(resumeReason(record,[waiting,{type:'system'},queued]),'Pending task result')
+  assert.equal(resumeReason(record,[waiting,queued,{type:'queue-operation',operation:'dequeue'}]),null)
+  assert.equal(resumeReason(record,[waiting,queued,{type:'queue-operation',operation:'remove',content:notice}]),null)
+  assert.equal(resumeReason(record,[queued,{type:'queue-operation',operation:'dequeue'},waiting]),null)
+})
+
 test('limit retry selects recent usage errors and preserves the current account',async t=>{
   const f=await fixture(t)
   const active=[{...f.from,active:true},{...f.to,active:false}]
