@@ -9,7 +9,7 @@ Move local Claude Code conversations to a verified Personal plan, then resume in
 Requires macOS 13 or later, Node.js 22.21 or later, Claude Desktop, and the Xcode command line tools (`xcode-select --install`). Project transfer requires macOS 14 or later.
 
 ```sh
-npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.20
+npm install -g github:miguelpieras/claude-transplant#v4.1.3-resume.21
 claude-transplant-resume menubar
 ```
 
@@ -36,7 +36,7 @@ For the next move, sign into the next Personal plan and click **Move and resume*
 
 The app considers unfinished conversations active in the last 24 hours. It excludes archived conversations, scheduled runs, and conversations that already report a request for user input. It sends this message through Claude Desktop:
 
-> Continue the existing task from where it stopped. Check the result of any interrupted command or pending check before running it again. Keep the existing scope and instructions.
+> Continue the existing task from where it stopped. Check the status and results of subagents, background processes, interrupted commands, and pending checks. Use completed results and let active work continue. Resume unfinished subagents from their last known state. Start a replacement if a subagent cannot resume and its work is still needed. Restart stopped processes and interrupted commands only if they are still needed and safe to run again. Keep the existing scope and instructions.
 
 After your allowance resets, use **Resume limit-stopped** on the current plan. The count shows recent conversations with a session, weekly, usage, or rate-limit error. This button sends the same Continue message without moving records or changing accounts. It uses the same 24-hour window and exclusions; other errors and finished work are not selected. It does not check when your allowance resets, so Claude can report the limit again if it is still active.
 
