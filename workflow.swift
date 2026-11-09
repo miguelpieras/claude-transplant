@@ -5,6 +5,8 @@ struct LocalAccount: Decodable {
     let account: String
     let org: String
     let label: String?
+    var profileId: String? = nil
+    var identity: String { account + "/" + org + "/" + (profileId ?? "") }
 }
 struct ResumeItem: Decodable {
     let recordId: String
@@ -143,8 +145,8 @@ extension Model {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.resumeWorkflow(items, target: target, index: index, moved: moved, retry: retry + 1) }
                 return
             }
-            guard status == 0, let current, current.account == target.account, current.org == target.org else {
-                flowActionError = "The selected Claude account changed or could not be checked. Resume stopped before sending another message."
+            guard status == 0, let current, current.identity == target.identity else {
+                flowActionError = "The Claude account or profile changed or could not be checked. Resume stopped before sending another message."
                 flowBusy = false; running = false; return
             }
             note = "Resuming \(index + 1) of \(items.count): \(items[index].title)"

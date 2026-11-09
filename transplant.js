@@ -390,6 +390,51 @@ export function layout(home = os.homedir()) {
   }
 }
 
+const desktopPS = (args) => {
+  const result = spawnSync('/bin/ps', args, { encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } })
+  if (result.error || result.status !== 0) throw new Error('Could not inspect the running Claude Desktop app')
+  return result.stdout
+}
+const desktopRows = (paths) => parseProcesses(desktopPS(['-ww', '-axo', 'pid=,ppid=,lstart=,comm=']), '', paths.claudeApp)
+const desktopApps = (paths, table) => table.filter(row => desktopExecutable(row.executable) || row.executable === path.join(paths.claudeApp, 'Contents/MacOS/Claude'))
+
+export function resolveDesktopProfile(paths, inspect = desktopPS) {
+  const table = parseProcesses(inspect(['-ww', '-axo', 'pid=,ppid=,lstart=,comm=']), '', paths.claudeApp)
+  const apps = desktopApps(paths, table)
+  if (apps.length > 1) throw new Error('Keep only one Claude Desktop profile open, then click Refresh')
+  if (!apps.length) return paths
+  const app = apps[0]
+  const process = inspect(['-ww', '-p', String(app.pid), '-o', 'lstart=,command=']).trim()
+  const command = process.slice(app.started.length).trimStart()
+  if (!process.startsWith(app.started + ' ') || command !== app.executable && !command.startsWith(app.executable + ' ')) {
+    throw new Error('Claude Desktop changed during the profile check. Click Refresh')
+  }
+  const args = command.slice(app.executable.length)
+  const flags = [...args.matchAll(/(?:^|\s)--user-data-dir(?=[=\s]|$)(?:=|\s+)?(.*?)(?=\s+-|$)/g)]
+  const desktopInstance = processIdentity(app)
+  if (!flags.length) return { ...paths, desktopInstance }
+  const directory = flags[0][1].trim()
+  if (flags.length !== 1 || !path.isAbsolute(directory) || /[\r\n]/.test(directory)) throw new Error('Could not identify the Claude Desktop profile')
+  let profile
+  try {
+    profile = realpathSync(directory)
+    if (!readFileSync(path.join(profile, 'config.json')).length) throw new Error()
+  } catch {
+    throw new Error('Could not read the open Claude Desktop profile')
+  }
+  if (profile === path.dirname(paths.desktop)) return { ...paths, desktopInstance }
+  const profileId = sha(profile)
+  return { ...paths, profile, profileId, desktopInstance, claudeApp: app.executable.slice(0, -'/Contents/MacOS/Claude'.length),
+    records: path.join(profile, 'claude-code-sessions'), agentSessions: path.join(profile, 'local-agent-mode-sessions'),
+    desktop: path.join(profile, 'config.json'), cookies: path.join(profile, 'Cookies'), state: path.join(paths.state, 'profiles', profileId) }
+}
+
+export function checkDesktopProfile(paths) {
+  if (!paths.desktopInstance) return
+  const live = resolveDesktopProfile(layout(paths.home))
+  if (live.desktopInstance !== paths.desktopInstance || live.profileId !== paths.profileId) throw new Error('The Claude Desktop profile changed. Click Refresh')
+}
+
 async function dirs(root) {
   const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
   return entries.filter((e) => e.isDirectory() && UUID.test(e.name)).map((e) => e.name).sort()
@@ -744,13 +789,9 @@ function mode(values) {
 export async function signedIn(paths, table = null) {
   const unknown = (state = 'unknown', time = null) => ({ account: null, org: null, state, source: time === null ? 'unknown' : 'log', at: time === null ? null : new Date(time).toISOString() })
   try {
-    if (table === null) {
-      const result = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } })
-      if (result.error || result.status !== 0) return unknown()
-      table = parseProcesses(result.stdout, '', paths.claudeApp)
-    }
-    const apps = table.filter((row) => desktopExecutable(row.executable) || row.executable === path.join(paths.claudeApp, 'Contents/MacOS/Claude'))
+    const apps = desktopApps(paths, table ?? desktopRows(paths))
     if (apps.length !== 1) return unknown()
+    if (paths.desktopInstance && processIdentity(apps[0]) !== paths.desktopInstance) return unknown()
     const started = Date.parse(apps[0].started)
     if (!Number.isFinite(started) || started > Date.now()) return unknown()
     const desktop = await readJson(paths.desktop).catch(() => ({}))
@@ -1031,10 +1072,13 @@ export async function accounts(paths, processes = null, { verifyIdentity = false
   for (const { account, org, dir, files } of [...stored, ...known]) {
     const sessions = []
     const unreadable = []
-    for (const file of files) {
-      const r = await readJson(file).catch(() => null)
-      if (!r) { unreadable.push(file); continue }
-      sessions.push(desktopSession(file, r))
+    for (let i = 0; i < files.length; i += 32) {
+      const batch = files.slice(i, i + 32)
+      const rows = await Promise.all(batch.map(file => readJson(file).catch(() => null)))
+      for (const [j, r] of rows.entries()) {
+        if (!r) unreadable.push(batch[j])
+        else sessions.push(desktopSession(batch[j], r))
+      }
     }
     const activeAt = Math.max(0, ...sessions.map((s) => s.activeAt))
     const email = emails.get(account) ?? null
@@ -4260,7 +4304,7 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
   if (!launch) return app
   stop()
   await mkdir(path.dirname(agent), { recursive: true })
-  await writeFile(agent, plist({ Label: LABEL, ProgramArguments: [binary], RunAtLoad: true }))
+  await writeFile(agent, plist({ Label: LABEL, ProgramArguments: [binary], RunAtLoad: true, ProcessType: 'Interactive' }))
   // bootout can return before launchd removes the old service, and bootstrap fails with error 5 until it is gone.
   await waitFor(() => spawnSync('launchctl', ['print', `${domain}/${LABEL}`]).status !== 0, performance.now() + 10_000)
   const load = spawnSync('launchctl', ['bootstrap', domain, agent], { encoding: 'utf8' })
@@ -4331,7 +4375,10 @@ async function main(argv) {
   if (args.version) return process.stdout.write(`${(await readJson(path.join(HERE, 'package.json'))).version}\n`)
   const [nodeMajor,nodeMinor]=process.versions.node.split('.').map(Number)
   if (nodeMajor<22||nodeMajor===22&&nodeMinor<21) throw new Error('Node 22.21 or newer is required')
-  const paths = layout()
+  const base = layout()
+  const localProfileCommand = ['accounts', 'local-source', 'local-plan', 'local-move', 'local-status', 'local-identity'].includes(args.cmd)
+  const paths = ['menubar', 'project-prepare', 'project-verify'].includes(args.cmd) ? base : resolveDesktopProfile(base)
+  if (paths.profile && !localProfileCommand) throw new Error('Use the local workflow with a custom Claude Desktop profile')
   const out = process.stdout
   const emit = (o) => out.write(`${JSON.stringify(o)}\n`)
   if (['project-status','project-select','project-stage-all','project-stage','project-move'].includes(args.cmd)) {
@@ -4580,6 +4627,7 @@ async function main(argv) {
           active,
           signedIn,
           identityState,
+          profileId: paths.profileId,
           identityKnown,
           personal,
           sessions: sessions.length,

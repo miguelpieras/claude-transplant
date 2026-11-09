@@ -26,6 +26,7 @@ struct Account: Decodable, Identifiable {
     var sessions: Int? = nil
     var identityKnown: Bool? = nil
     var personal: Bool? = nil
+    var profileId: String? = nil
     var id: String { account + "/" + org }
     var selector: String { account + " " + org }
     var name: String { email ?? String(account.prefix(8)) }
@@ -439,7 +440,7 @@ final class Model: ObservableObject {
 
     func pollAccount() {
         guard !identityPolling, !flowChecking, !running, !sweeping else { return }
-        guard flowPlan != nil || flowNeedsSource else { refresh(); return }
+        guard flowPlan != nil || flowNeedsSource || !flowError.isEmpty else { refresh(); return }
         identityPolling = true
         var output = ""
         run(["local-identity", "--json"], line: { output += $0 }) { [weak self] status, _ in
@@ -447,7 +448,7 @@ final class Model: ObservableObject {
             identityPolling = false
             guard !running, !sweeping, !flowChecking else { return }
             let current = status == 0 ? output.data(using: .utf8).flatMap { try? JSONDecoder().decode(LocalAccount.self, from: $0) } : nil
-            let identity = current.map { "\($0.account)/\($0.org)" } ?? ""
+            let identity = current?.identity ?? ""
             guard identity != activeIdentity else { return }
             flowPlan = nil
             note = ""
@@ -471,17 +472,18 @@ final class Model: ObservableObject {
         refreshing = true
         flowError = ""
         var text = ""
-        run(["accounts", "--json"], line: { text += $0 }) { [weak self] status, _ in
+        run(["accounts", "--json"], line: { text += $0 }) { [weak self] status, error in
             guard let self else { return }
             refreshing = false
             guard status == 0, let data = text.data(using: .utf8), let list = try? JSONDecoder().decode([Account].self, from: data) else {
                 flowPlan = nil
-                flowError = "Could not read your Claude account. Keep Claude open and try again shortly."
+                flowNeedsSource = false
+                flowError = error.isEmpty ? "Could not read your Claude account. Keep Claude open and try again shortly." : error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
                 return
             }
             accounts = list
             settle()
-            let identity = list.filter { $0.active == true }.map(\.id).joined(separator: ",")
+            let identity = list.filter { $0.active == true }.map { LocalAccount(account: $0.account, org: $0.org, label: $0.label, profileId: $0.profileId).identity }.joined(separator: ",")
             if !activeIdentity.isEmpty && identity != activeIdentity { note = ""; lines = [] }
             activeIdentity = identity
             if !snapshot { refreshWorkflow() }
@@ -843,7 +845,7 @@ final class Model: ObservableObject {
             done(1, error.localizedDescription)
             return
         }
-        if args.first == "accounts" {
+        if args.first == "accounts" || args.first == "local-plan" {
             DispatchQueue.global().asyncAfter(deadline: .now() + 60) { if process.isRunning { process.terminate() } }
         }
         DispatchQueue.global().async {

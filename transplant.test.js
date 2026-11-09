@@ -7003,9 +7003,13 @@ struct StateChecks {
     static func main() {
         let checking = Model(config: Config(node: "fixture", script: "fixture"))
         precondition(checking.flowChecking && requests.count == 1)
-        requests.removeFirst().2(1, "fixture account read failed")
+        requests.removeFirst().2(1, "claude-transplant-resume: Could not read the open Claude Desktop profile")
         precondition(!checking.flowChecking && checking.flowPlan == nil)
-        precondition(checking.flowError.contains("Could not read your Claude account"))
+        precondition(checking.flowError == "Could not read the open Claude Desktop profile")
+        checking.pollAccount()
+        precondition(requests.count == 1 && requests[0].0 == ["local-identity", "--json"] && !checking.flowChecking)
+        requests.removeFirst().2(1, "")
+        precondition(requests.isEmpty && checking.flowError == "Could not read the open Claude Desktop profile")
         let planJSON = #"{"from":{"account":"source","org":"personal"},"to":{"account":"target","org":"personal"},"count":1,"moving":true,"token":"fixture","resume":[]}"#
         checking.flowPlan = try! JSONDecoder().decode(LocalPlan.self, from: Data(planJSON.utf8))
         checking.refresh()

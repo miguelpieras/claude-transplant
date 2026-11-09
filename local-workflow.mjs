@@ -2,7 +2,7 @@ import {createHash, randomUUID} from 'node:crypto'
 import {spawnSync} from 'node:child_process'
 import {readdir, readFile, rename, mkdir, link, unlink, stat, open} from 'node:fs/promises'
 import path from 'node:path'
-import {accounts, signedIn, locked} from './transplant.js'
+import {accounts, checkDesktopProfile, signedIn, locked} from './transplant.js'
 
 const ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
 const RECORD = /^local_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.json$/i
@@ -41,6 +41,7 @@ export async function selectSource(paths,selector,{allAccounts=null}={}) {
   if(source.unreadable?.length || source.taskError)throw new Error('The source contains unreadable records or tasks; repair them before selecting it')
   const records=await names(namespace(paths,source))
   if(!records.length)throw new Error('The selected source has no local conversations')
+  checkDesktopProfile(paths)
   const initial={version:1,current:ref(source),records,preserve:{}}
   await atomic(path.join(paths.state,'local-workflow.json'),initial)
   return {selected:true,count:records.length,source:ref(source)}
@@ -116,10 +117,11 @@ export async function resumeCandidates(paths,dir,selected) {
 export async function planLocal(paths,{allAccounts=null,includeResume=true,limitsOnly=false}={}) {
   const group=await collection(paths)
   const all=allAccounts??await accounts(paths,null,{verifyIdentity:true})
-  if(!group)return {setup:true}
+  if(!group && !paths.profile)return {setup:true}
   const to=all.find(row=>row.active)
   if (!to) throw new Error('Open Claude Desktop and sign into the destination plan')
   if (!to.identityKnown) throw new Error('Could not verify your Claude account. Keep Claude open and try again shortly.')
+  if(!group)return {setup:true}
   if (!to.personal) throw new Error('This plan is not Personal Max or Pro. Select a Personal Max or Pro plan in Claude.')
   if(allAccounts===null && !same(to,await signedIn(paths)))throw new Error('Claude is still changing accounts. Try again in a moment.')
   const pending=await read(path.join(paths.state,'local-workflow-pending.json'),null)
@@ -134,7 +136,7 @@ export async function planLocal(paths,{allAccounts=null,includeResume=true,limit
   const dir=namespace(paths,from), keep=new Set(group.preserve?.[`${from.account}/${from.org}`]??[])
   const selected=(await names(dir)).filter(name=>!keep.has(name))
   if (!selected.length) throw new Error('No conversations remain in the recorded source account')
-  const token=digest(JSON.stringify({from:ref(from),to:ref(to),selected}))
+  const token=digest(JSON.stringify({profileId:paths.profileId,from:ref(from),to:ref(to),selected}))
   const candidates=includeResume?await resumeCandidates(paths,dir,selected):[]
   const limited=candidates.filter(item=>item.reason==='Usage limit reached')
   return {from:ref(from),to:ref(to),count:selected.length,moving:!same(from,to),token,records:selected,
@@ -143,7 +145,7 @@ export async function planLocal(paths,{allAccounts=null,includeResume=true,limit
 
 export async function assertDesktopStopped(paths,records) {
   const output=spawnSync('/bin/ps',['-axo','pid=,comm='],{encoding:'utf8'}).stdout??''
-  if (output.includes('/Applications/Claude.app/Contents/MacOS/Claude') || output.includes('/Library/Application Support/Claude/claude-code/')) throw new Error('Claude or one of its Desktop workers is still running')
+  if (output.includes('/Claude.app/Contents/MacOS/Claude') || output.includes('/Library/Application Support/Claude/claude-code/')) throw new Error('Claude or one of its Desktop workers is still running')
   const ids=new Set(records.map(row=>row.data.cliSessionId).filter(Boolean))
   for (const file of await readdir(path.join(paths.home,'.claude/sessions')).catch(()=>[])) {
     const registration=await read(path.join(paths.home,'.claude/sessions',file),null).catch(()=>null)
@@ -287,14 +289,21 @@ async function quitDesktop(paths) {
   if(result.status!==0) throw new Error('Claude refused to close; finish its open dialog and try again')
   for(let count=0;count<100;count++) {
     const list=spawnSync('/bin/ps',['-axo','comm='],{encoding:'utf8'}).stdout??''
-    if(!list.includes('/Applications/Claude.app/Contents/MacOS/Claude') && !list.includes('/Library/Application Support/Claude/claude-code/'))return
+    if(!list.includes('/Claude.app/Contents/MacOS/Claude') && !list.includes('/Library/Application Support/Claude/claude-code/'))return
     await new Promise(resolve=>setTimeout(resolve,250))
   }
   throw new Error('Claude did not stop within 25 seconds; no force quit was used')
 }
 
+function openDesktop(paths) {
+  const args=['-a',paths.claudeApp]
+  if(paths.profile)args.push('--args',`--user-data-dir=${paths.profile}`)
+  const result=spawnSync('/usr/bin/open',args,{encoding:'utf8',timeout:10000})
+  if(result.status!==0)throw new Error('Could not reopen the selected Claude Desktop profile')
+}
+
 export async function runLocal(paths,command,token,emit,{source=null,includeResume=true,limitsOnly=false,io={}}={}) {
-  if(command==='local-identity')return emit(await signedIn(paths))
+  if(command==='local-identity')return emit({...await signedIn(paths),profileId:paths.profileId})
   if(command==='local-plan') return emit(await planLocal(paths,{includeResume,limitsOnly}))
   if(command==='local-source')return locked(paths,async()=>emit(await selectSource(paths,source)))
   if(command==='local-status') {
@@ -312,17 +321,18 @@ export async function runLocal(paths,command,token,emit,{source=null,includeResu
     const plan=await(io.plan??planLocal)(paths,{includeResume,limitsOnly})
     if(plan.setup)throw new Error('Select the source account first')
     if(plan.token!==token)throw new Error('The account or session list changed. Refresh and try again.')
+    checkDesktopProfile(paths)
     if(plan.moving){
       emit({stage:'close',text:'Closing Claude briefly'})
       await(io.quitDesktop??quitDesktop)(paths)
       const moveOptions={checkStopped:io.checkStopped??assertDesktopStopped}
       try{if(plan.recovery)await recoverLocal(paths,moveOptions);emit({stage:'move',text:`Moving ${plan.count} records`});await moveRecords(paths,plan,moveOptions)}
-      finally{await(io.openDesktop??(()=>spawnSync('/usr/bin/open',['-a',paths.claudeApp],{encoding:'utf8'})))(paths)}
+      finally{await(io.openDesktop??openDesktop)(paths)}
     } else {
       const group=await collection(paths);group.resume=plan.resume;await atomic(path.join(paths.state,'local-workflow.json'),group)
     }
     const group=await collection(paths);group.lastResumeAt=new Date().toISOString();group.resume=plan.resume
     await atomic(path.join(paths.state,'local-workflow.json'),group)
-    emit({done:true,ok:true,moved:plan.moving?plan.count:0,resume:plan.resume,target:plan.to})
+    emit({done:true,ok:true,moved:plan.moving?plan.count:0,resume:plan.resume,target:paths.profileId?{...plan.to,profileId:paths.profileId}:plan.to})
   })
 }

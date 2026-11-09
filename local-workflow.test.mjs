@@ -6,7 +6,7 @@ import path from 'node:path'
 import childProcess, {spawnSync} from 'node:child_process'
 import {createHash} from 'node:crypto'
 import {syncBuiltinESMExports} from 'node:module'
-import {accountIdentity, accounts, cloudClient} from './transplant.js'
+import {accountIdentity, accounts, cloudClient, layout, resolveDesktopProfile, signedIn} from './transplant.js'
 import {collection, selectSource, planLocal, moveRecords, recoverLocal, resumeReason, runLocal, assertDesktopStopped} from './local-workflow.mjs'
 
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
@@ -65,6 +65,32 @@ test('account verification receives the identity fetched from Claude',async t=>{
   assert.equal(verified.email,'personal@example.com')
   assert.deepEqual(verified.organizations,[{org:selected.org,label:'Personal Max',personal:true},{org:uuid(3),label:'Company',personal:false}])
   assert.deepEqual(requested,['/api/account','/api/organizations'])
+})
+
+test('local workflow uses the running Desktop profile and keeps its state separate',async t=>{
+  const f=await fixture(t), base=layout(f.paths.home)
+  const custom=path.join(base.home,'repaired Claude')
+  const exe=path.join(base.claudeApp,'Contents/MacOS/Claude')
+  const [weekday,month,day,year,time]=new Date(Date.now()-60_000).toString().split(' ')
+  const started=`${weekday} ${month} ${String(Number(day)).padStart(2)} ${time} ${year}`
+  const processes=` 123 1 ${started}     ${exe}\n`
+  const inspect=(flag='')=>args=>args.includes('-p')?`${started}     ${exe}${flag}\n`:processes
+  await put(base.desktop,{lastKnownAccountUuid:f.from.account})
+  await put(path.join(custom,'config.json'),{lastKnownAccountUuid:f.to.account})
+  await mkdir(base.logs,{recursive:true})
+  const date=new Date(Date.now()-30_000)
+  const stamp=new Date(date.getTime()-date.getTimezoneOffset()*60_000).toISOString().slice(0,19).replace('T',' ')
+  await writeFile(path.join(base.logs,'main.log'),`${stamp} [info] [LocalSessionManager] Initialization succeeded accountId=${f.to.account}, orgId=${f.to.org}\n`)
+  const resolved=resolveDesktopProfile(base,inspect(` --user-data-dir=${custom} --other-flag`))
+  assert.equal(resolved.records,path.join(resolved.profile,'claude-code-sessions'))
+  assert.equal(resolved.cookies,path.join(resolved.profile,'Cookies'))
+  assert.equal(resolved.pool,base.pool)
+  assert.equal(path.dirname(resolved.state),path.join(base.state,'profiles'))
+  const table=[{pid:123,started,executable:exe}]
+  assert.equal((await signedIn(resolved,table)).account,f.to.account)
+  assert.equal((await signedIn(base,table)).state,'unknown')
+  assert.equal(resolveDesktopProfile(base,inspect()).state,base.state)
+  assert.throws(()=>resolveDesktopProfile(base,inspect(` --user-data-dir=${custom} --user-data-dir=${custom}`)),/identify the Claude Desktop profile/)
 })
 
 test('planning follows the active Personal plan and refuses a Team plan',async t=>{
