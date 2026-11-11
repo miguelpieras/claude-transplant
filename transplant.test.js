@@ -7,12 +7,20 @@ import fs, { appendFile, mkdir, mkdtemp, open, readdir, readFile, rename, stat, 
 import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { accounts, cloudClient, executeMove, finishHeld, finishPending, finishWorkflow, inventory, keepLocal, layout, move, normalize, parseProcesses, receiptSummary, refreshAccountIdentity, restartPlan, resumeLast, semantic, signedIn, step, sweep, undo, verifyPlaced, withDesktopRestart, writeNew } from './transplant.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+// Each folder that a test makes in the temporary folder. They go after the last test, so a run leaves none there.
+const madeFolders = []
+const madeFolder = async (prefix) => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), prefix))
+  madeFolders.push(folder)
+  return folder
+}
+after(() => Promise.all(madeFolders.map((folder) => fs.rm(folder, { recursive: true, force: true }))))
 // Fixtures see no running processes. Only tests that start real processes read the real list.
 let liveProcesses = false
 const fixtureCommand = run => (file, ...args) => {
@@ -134,7 +142,7 @@ test('process inventory handles more than one megabyte of unrelated argv', async
 })
 
 test('publication exposes complete bytes only after creation evidence is saved', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'ct-publish-')), file = path.join(root, 'record.json'), payload = '{"title":"complete"}\n'
+  const root = await madeFolder('ct-publish-'), file = path.join(root, 'record.json'), payload = '{"title":"complete"}\n'
   await writeNew(file, payload, async (created) => {
     assert.equal(created.size, Buffer.byteLength(payload))
     assert.equal(await readFile(file).catch(() => null), null)
@@ -2166,7 +2174,7 @@ test('project artifact reads return safe metadata rather than viewer tokens or r
 })
 
 async function home() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'ct-home-'))
+  const root = await madeFolder('ct-home-')
   const paths = layout(root)
   const project = path.join(paths.pool, '-tmp-fixture')
   const acct = { P: id(901), T: id(902), Z: id(903), Q: id(904) }
@@ -6974,7 +6982,7 @@ test('process registry identifies a new worker without argv ids and rejects stal
 })
 
 test('Swift preserves command, progress, metadata, and completion states', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'ct-swift-state-'))
+  const root = await madeFolder('ct-swift-state-')
   const checkpointAccounts = await checkpointAccountsFixture()
   const h = await taskFamilyFixture(true, 1)
   await interruptTaskFamily(h, 'move', 'target')
