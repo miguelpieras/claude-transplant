@@ -4229,6 +4229,52 @@ const compileMenubar = (source, binary) => {
   if (build.status !== 0) throw new Error(`swiftc failed\n${build.stderr.trim()}`)
 }
 
+const signingOutput = result => `${result.stdout ?? ''}\n${result.stderr ?? ''}`
+const signingCommand = (args, message) => {
+  const result = spawnSync('codesign', args, { encoding: 'utf8', timeout: 60_000 })
+  if (result.error || result.status !== 0) throw new Error(`${message}: ${(result.error?.message || result.stderr || result.stdout || 'codesign failed').trim()}`)
+  return signingOutput(result)
+}
+const designatedRequirement = app => {
+  const output = signingCommand(['--display', '--requirements', '-', app], 'Could not read the app signing requirement')
+  const requirement = output.match(/^designated\s*=>\s*(.+)$/m)?.[1]?.trim()
+  if (!requirement || /\bcdhash\b/.test(requirement)) throw new Error('The app does not have a stable signing requirement')
+  return requirement
+}
+
+async function menubarSigning(paths, app) {
+  const file = path.join(paths.state, 'signing-identity.json')
+  let pin = null, hasPin = false
+  try { pin = await readJson(file); hasPin = true }
+  catch (error) { if (error.code !== 'ENOENT') throw new Error('The saved app signing identity cannot be read') }
+  if (hasPin && (!pin || pin.version !== 1 || !/^[a-f0-9]{40}$/i.test(pin.identity ?? '') || typeof pin.requirement !== 'string' || !pin.requirement.trim() || /\bcdhash\b/.test(pin.requirement))) throw new Error('The saved app signing identity is invalid')
+  const result = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], { encoding: 'utf8', timeout: 15_000 })
+  const identities = [...new Map([...signingOutput(result).matchAll(/^\s*\d+\)\s+([a-f0-9]{40})\s+"(Developer ID Application:[^"]+)"\s*$/gmi)].map(match => [match[1].toUpperCase(), match[2]])).keys()]
+  if (pin && !identities.includes(pin.identity.toUpperCase())) throw new Error('The saved Developer ID Application signing identity is unavailable. The installed app was kept.')
+  if (!pin && identities.length > 1) throw new Error('More than one Developer ID Application signing identity is available. Select one signing identity before you update the app.')
+  let installedRequirement = null
+  if (await exists(app)) {
+    const installed = spawnSync('codesign', ['--display', '--verbose=4', app], { encoding: 'utf8', timeout: 15_000 })
+    const output = signingOutput(installed)
+    if ((installed.error || installed.status !== 0) && await exists(path.join(app, 'Contents/_CodeSignature/CodeResources'))) throw new Error('The installed app signing identity cannot be checked. The installed app was kept.')
+    if (/^Authority=/m.test(output) && !/^Signature=adhoc$/m.test(output)) installedRequirement = designatedRequirement(app)
+  }
+  if (!pin && !identities.length && installedRequirement) throw new Error('No Developer ID Application signing identity is available for the signed app. The installed app was kept.')
+  if (!pin && !identities.length) return { warning: 'No Developer ID Application signing identity is available. Native updates can require Accessibility access again.' }
+  return { identity: pin?.identity.toUpperCase() ?? identities[0], requirement: pin?.requirement ?? installedRequirement, installedRequirement }
+}
+
+function signMenubar(app, signing) {
+  if (!signing.identity) return null
+  signingCommand(['--force', '--sign', signing.identity, '--identifier', LABEL, '--timestamp', app], 'Could not sign the app')
+  signingCommand(['--verify', '--strict', '--verbose=2', app], 'The app signature is invalid')
+  const requirement = designatedRequirement(app)
+  for (const expected of new Set([signing.requirement, signing.installedRequirement].filter(Boolean))) {
+    signingCommand(['--verify', '--strict', '--test-requirement', `=${expected}`, app], 'The app signing identity changed')
+  }
+  return { version: 1, identity: signing.identity, requirement: signing.requirement ?? requirement }
+}
+
 export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
   const app = path.join(paths.state, 'Claude Transplant Resume.app')
   const binary = path.join(app, 'Contents/MacOS/Claude Transplant Resume')
@@ -4259,7 +4305,8 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
     }
     return `snapshot written | ${output}`
   }
-  // Keep the native identity and macOS access grants for JavaScript-only updates.
+  const signing = await menubarSigning(paths, app)
+  // Reuse native code when possible, then sign the complete staged app.
   const nativeSources = (await readFile(source, 'utf8')) + (await readFile(path.join(HERE, 'workflow.swift'), 'utf8')) + (await readFile(path.join(HERE, 'project-artifact-export.swift'), 'utf8'))
   const key = sha(nativeSources)
   const built = path.join(app, 'Contents/Resources/build.sha256')
@@ -4279,38 +4326,76 @@ export async function menubar(paths, remove, snapshot, { launch = true } = {}) {
     NSHighResolutionCapable: true,
     NSAppleEventsUsageDescription: 'Claude Transplant Resume closes and reopens Claude when you move your conversations.'
   }
-  if (!nativeMatches || !(await stat(binary).catch(() => null))?.isFile()) {
-    const fresh = `${app}.building`
-    await rm(fresh, { recursive: true, force: true })
-    await mkdir(path.join(fresh, 'Contents/MacOS'), { recursive: true })
-    await mkdir(path.join(fresh, 'Contents/Resources'), { recursive: true })
-    await writeFile(path.join(fresh, 'Contents/Info.plist'), plist(info))
-    compileMenubar(source, path.join(fresh, 'Contents/MacOS/Claude Transplant Resume'))
-    await writeFile(path.join(fresh, 'Contents/Resources/build.sha256'), key)
-    if (launch) stop()
-    await rm(app, { recursive: true, force: true })
-    await rename(fresh, app)
-  } else {
-    await writeFile(built, key)
-    await writeFile(path.join(app, 'Contents/Info.plist'), plist(info))
+  const fresh = `${app}.building`, previous = `${app}.previous`
+  if (await exists(previous)) throw new Error(`A previous app update needs recovery: ${previous}`)
+  await rm(fresh, { recursive: true, force: true })
+  const configFile = path.join(paths.state, 'menubar.json'), pinFile = path.join(paths.state, 'signing-identity.json')
+  const oldFiles = new Map()
+  for (const file of [configFile, pinFile, agent]) {
+    try { oldFiles.set(file, await readFile(file)) }
+    catch (error) { if (error.code === 'ENOENT') oldFiles.set(file, null); else throw error }
   }
-  const script = path.join(app, 'Contents/Resources/transplant.js')
-  await copyFile(path.join(HERE, 'transplant.js'), script)
-  await copyFile(path.join(HERE, 'local-workflow.mjs'), path.join(app, 'Contents/Resources/local-workflow.mjs'))
-  for (const name of ['local-capture.mjs', 'project-workflow.mjs', 'project-source.mjs', 'project-transfer.mjs', 'project-cli.mjs', 'project-artifacts.mjs', 'project-native-artifacts.mjs', 'project-resume.mjs']) await copyFile(path.join(HERE, name), path.join(app, 'Contents/Resources', name))
-  await copyFile(path.join(HERE, 'package.json'), path.join(app, 'Contents/Resources/package.json'))
-  const config = jsonText({ node: process.execPath, script })
-  await writeFile(path.join(paths.state, 'menubar.json'), config)
-  await writeFile(path.join(app, 'Contents/Resources/menubar.json'), config)
+  let stopped = false, saved = false, installed = false
+  try {
+    const resources = path.join(fresh, 'Contents/Resources')
+    const freshBinary = path.join(fresh, 'Contents/MacOS/Claude Transplant Resume')
+    await mkdir(path.dirname(freshBinary), { recursive: true })
+    await mkdir(resources, { recursive: true })
+    await writeFile(path.join(fresh, 'Contents/Info.plist'), plist(info))
+    if (nativeMatches && (await stat(binary).catch(() => null))?.isFile()) await copyFile(binary, freshBinary)
+    else compileMenubar(source, freshBinary)
+    await writeFile(path.join(resources, 'build.sha256'), key)
+    for (const name of ['transplant.js', 'local-workflow.mjs', 'local-capture.mjs', 'project-workflow.mjs', 'project-source.mjs', 'project-transfer.mjs', 'project-cli.mjs', 'project-artifacts.mjs', 'project-native-artifacts.mjs', 'project-resume.mjs', 'package.json']) await copyFile(path.join(HERE, name), path.join(resources, name))
+    const config = jsonText({ node: process.execPath, script: path.join(app, 'Contents/Resources/transplant.js') })
+    await writeFile(path.join(resources, 'menubar.json'), config)
+    const pin = signMenubar(fresh, signing)
+    // The installed app and its running process stay unchanged until signing succeeds.
+    if (launch) {
+      stopped = true
+      stop()
+      const unloaded = await waitFor(() => spawnSync('launchctl', ['print', `${domain}/${LABEL}`]).status !== 0, performance.now() + 10_000)
+      if (!unloaded) throw new Error('The previous app did not stop. The update was not installed.')
+    }
+    if (await exists(app)) { await rename(app, previous); saved = true }
+    await rename(fresh, app); installed = true
+    await saveText(configFile, config)
+    if (launch) {
+      await mkdir(path.dirname(agent), { recursive: true })
+      await saveText(agent, plist({ Label: LABEL, ProgramArguments: [binary], RunAtLoad: true, ProcessType: 'Interactive' }))
+      const load = spawnSync('launchctl', ['bootstrap', domain, agent], { encoding: 'utf8' })
+      if (load.error || load.status !== 0) throw new Error(`launchctl failed: ${(load.error?.message || load.stderr || '').trim()}`)
+      const started = await waitFor(() => {
+        const job = spawnSync('launchctl', ['print', `${domain}/${LABEL}`], { encoding: 'utf8' })
+        return job.status === 0 && /\bstate = running\b/.test(job.stdout ?? '') && /\bpid = [1-9]\d*\b/.test(job.stdout ?? '')
+      }, performance.now() + 10_000)
+      if (!started) throw new Error('The updated app did not start. The previous app will be restored.')
+    }
+    if (pin) await saveJson(pinFile, pin)
+  } catch (error) {
+    const recovery = []
+    if (launch && installed) stop()
+    try {
+      if (installed) await rm(app, { recursive: true, force: true })
+      if (saved) await rename(previous, app)
+      if (installed) for (const [file, content] of oldFiles) {
+        if (content === null) await rm(file, { force: true })
+        else { await mkdir(path.dirname(file), { recursive: true }); await saveText(file, content) }
+      }
+    } catch (restoreError) { recovery.push(`Could not restore the previous app: ${restoreError.message}`) }
+    if (launch && stopped && oldFiles.get(agent) !== null) {
+      await waitFor(() => spawnSync('launchctl', ['print', `${domain}/${LABEL}`]).status !== 0, performance.now() + 10_000)
+      const restored = spawnSync('launchctl', ['bootstrap', domain, agent], { encoding: 'utf8' })
+      if (restored.error || restored.status !== 0) recovery.push('Could not reopen the previous app')
+    } else if (launch && stopped && saved && !recovery.length) {
+      const restored = spawnSync('/usr/bin/open', ['-a', app], { encoding: 'utf8' })
+      if (restored.error || restored.status !== 0) recovery.push('Could not reopen the previous app')
+    }
+    throw new Error([error.message, ...recovery].join('\n'))
+  } finally { await rm(fresh, { recursive: true, force: true }) }
+  if (saved) await rm(previous, { recursive: true, force: true })
+  if (signing.warning) process.stderr.write(`${signing.warning}\n`)
   if (!launch) return app
-  stop()
-  await mkdir(path.dirname(agent), { recursive: true })
-  await writeFile(agent, plist({ Label: LABEL, ProgramArguments: [binary], RunAtLoad: true, ProcessType: 'Interactive' }))
-  // bootout can return before launchd removes the old service, and bootstrap fails with error 5 until it is gone.
-  await waitFor(() => spawnSync('launchctl', ['print', `${domain}/${LABEL}`]).status !== 0, performance.now() + 10_000)
-  const load = spawnSync('launchctl', ['bootstrap', domain, agent], { encoding: 'utf8' })
-  if (load.status !== 0) throw new Error(`launchctl failed: ${(load.stderr || '').trim()}`)
-  return `menubar installed | starts at login | ${app}`
+  return `menubar installed | starts at login | ${app}${signing.warning ? `\n${signing.warning}` : ''}`
 }
 
 function parse(argv) {

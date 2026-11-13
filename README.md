@@ -60,7 +60,11 @@ If the app is absent from the list, click **Open app folder** in its permission 
 
 macOS can also ask to let the app control Claude so it can close and reopen it. Enter a password only in the macOS prompt.
 
-The app is compiled locally and is not notarized. Updates that change only JavaScript or the version keep the native app binary and its Accessibility grant. Rebuilding the native app can invalidate that grant. If resume stops working after a native update, remove the old entry, add the app from the path above, and enable it again.
+The app is compiled locally and is not notarized. When a Developer ID Application identity is available in Keychain, the installer uses it to sign the complete app. It saves that identity outside the app and checks it on each update. It builds and verifies the new app before it replaces the installed app. A failed signing check leaves the installed app in place.
+
+The first change from an unsigned app to a signed app can require one new Accessibility approval. Later updates keep the same app identity. If macOS reports that the old entry is no longer valid, remove that entry, add the app from the path above, and enable it again. The installer does not change macOS privacy permissions.
+
+On a Mac without a Developer ID Application identity, a first installation can use local signing and reports this limit. Native updates can then require Accessibility approval again. After a signing identity is saved, the installer stops if that identity is unavailable; it does not silently change the signer.
 
 ## Data and account checks
 
