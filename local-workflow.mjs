@@ -1,8 +1,8 @@
 import {createHash, randomUUID} from 'node:crypto'
 import {spawnSync} from 'node:child_process'
-import {readdir, readFile, rename, mkdir, link, unlink, stat, open} from 'node:fs/promises'
+import {readdir, readFile, realpath, rename, mkdir, link, unlink, stat, open} from 'node:fs/promises'
 import path from 'node:path'
-import {accounts, checkDesktopProfile, signedIn, locked} from './transplant.js'
+import {accounts, checkDesktopProfile, layout, signedIn, locked} from './transplant.js'
 
 const ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
 const RECORD = /^local_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.json$/i
@@ -29,6 +29,48 @@ const atomic = async (file,value) => {
   try { await rename(temporary,file) } finally { await unlink(temporary).catch(()=>{}) }
 }
 
+const profileFile = paths => path.join(paths.baseState??(paths.profile?layout(paths.home).state:paths.state),'local-profile.json')
+const profileRoot = paths => paths.profile??path.dirname(paths.desktop??layout(paths.home).desktop)
+async function checkedProfile(directory) {
+  if(typeof directory!=='string' || !path.isAbsolute(directory))throw new Error('The saved Claude Desktop profile is invalid. Select the source again.')
+  try {
+    const canonical=await realpath(directory)
+    const config=path.join(canonical,'config.json')
+    if(!(await stat(config)).isFile() || !(await readFile(config)).length)throw new Error('Missing profile configuration')
+    return canonical
+  } catch {
+    throw new Error('The Claude Desktop profile is missing or cannot be read. Select an available source profile again.')
+  }
+}
+
+export async function readLocalProfile(paths) {
+  let saved
+  try {saved=JSON.parse(await readFile(profileFile(paths),'utf8'))}
+  catch(error) {
+    if(error.code==='ENOENT')return null
+    throw new Error('The saved Claude Desktop profile cannot be read. Select the source again.')
+  }
+  if(!saved || saved.version!==1)throw new Error('The saved Claude Desktop profile is invalid. Select the source again.')
+  return {version:1,profile:await checkedProfile(saved.profile)}
+}
+
+export async function rememberLocalProfile(paths) {
+  const saved={version:1,profile:await checkedProfile(profileRoot(paths))}
+  await atomic(profileFile(paths),saved)
+  return saved
+}
+
+export async function localProfileMismatch(paths) {
+  const saved=await readLocalProfile(paths)
+  if(!saved)return null
+  const currentProfile=await checkedProfile(profileRoot(paths))
+  return saved.profile===currentProfile?null:{profileMismatch:true,savedProfile:saved.profile,currentProfile}
+}
+
+async function requireLocalProfile(paths) {
+  if(await localProfileMismatch(paths))throw new Error('Claude opened a different profile. Open the saved Claude profile before you move or resume conversations.')
+}
+
 export async function collection(paths) {
   return read(path.join(paths.state,'local-workflow.json'),null)
 }
@@ -43,7 +85,14 @@ export async function selectSource(paths,selector,{allAccounts=null}={}) {
   if(!records.length)throw new Error('The selected source has no local conversations')
   checkDesktopProfile(paths)
   const initial={version:1,current:ref(source),records,preserve:{}}
+  const previous=await collection(paths)
   await atomic(path.join(paths.state,'local-workflow.json'),initial)
+  try {await rememberLocalProfile(paths)}
+  catch(error) {
+    if(previous)await atomic(path.join(paths.state,'local-workflow.json'),previous)
+    else await unlink(path.join(paths.state,'local-workflow.json'))
+    throw error
+  }
   return {selected:true,count:records.length,source:ref(source)}
 }
 
@@ -115,6 +164,8 @@ export async function resumeCandidates(paths,dir,selected) {
 }
 
 export async function planLocal(paths,{allAccounts=null,includeResume=true,limitsOnly=false}={}) {
+  const mismatch=await localProfileMismatch(paths)
+  if(mismatch)return mismatch
   const group=await collection(paths)
   const all=allAccounts??await accounts(paths,null,{verifyIdentity:true})
   if(!group && !paths.profile)return {setup:true}
@@ -302,10 +353,52 @@ function openDesktop(paths) {
   if(result.status!==0)throw new Error('Could not reopen the selected Claude Desktop profile')
 }
 
+async function profileRecords(directory) {
+  const rows=[]
+  for(const account of await readdir(directory).catch(error=>{if(error.code==='ENOENT')return [];throw error})) {
+    if(!ID.test(account))continue
+    for(const org of await readdir(path.join(directory,account))) {
+      if(!ID.test(org))continue
+      const dir=path.join(directory,account,org)
+      for(const name of await names(dir))rows.push({name,data:await read(path.join(dir,name))})
+    }
+  }
+  return rows
+}
+
+async function openLocalProfile(paths,io) {
+  const mismatch=await localProfileMismatch(paths)
+  if(!mismatch)throw new Error('No different saved Claude profile is available to open.')
+  const savedRecords=path.join(mismatch.savedProfile,'claude-code-sessions')
+  const rows=[...await profileRecords(paths.records),...await profileRecords(savedRecords)]
+  checkDesktopProfile(paths)
+  try {
+    await(io.quitDesktop??quitDesktop)(paths)
+    await(io.checkStopped??assertDesktopStopped)(paths,rows)
+    const saved=await readLocalProfile(paths)
+    if(saved?.profile!==mismatch.savedProfile)throw new Error('The saved Claude profile changed. Refresh and try again.')
+    const defaultDirectory=path.dirname(layout(paths.home).desktop)
+    const defaultProfile=await realpath(defaultDirectory).catch(error=>{if(error.code==='ENOENT')return defaultDirectory;throw error})
+    const isDefault=saved.profile===defaultProfile,baseState=path.dirname(profileFile(paths))
+    const target={...paths,baseState,state:isDefault?baseState:path.join(baseState,'profiles',digest(saved.profile)),
+      profile:isDefault?undefined:saved.profile,profileId:isDefault?undefined:digest(saved.profile),desktopInstance:undefined,
+      desktop:path.join(saved.profile,'config.json'),records:savedRecords,cookies:path.join(saved.profile,'Cookies'),
+      agentSessions:path.join(saved.profile,'local-agent-mode-sessions')}
+    await(io.openDesktop??openDesktop)(target)
+    return {opened:true,profile:saved.profile}
+  } catch(error) {
+    try {await(io.openDesktop??openDesktop)(paths)}
+    catch {throw new Error(`${error.message} Could not reopen the previous Claude profile.`)}
+    throw error
+  }
+}
+
 export async function runLocal(paths,command,token,emit,{source=null,includeResume=true,limitsOnly=false,io={}}={}) {
   if(command==='local-identity')return emit({...await signedIn(paths),profileId:paths.profileId})
   if(command==='local-plan') return emit(await planLocal(paths,{includeResume,limitsOnly}))
   if(command==='local-source')return locked(paths,async()=>emit(await selectSource(paths,source)))
+  if(command==='local-open-profile')return locked(paths,async()=>emit(await openLocalProfile(paths,io)))
+  await requireLocalProfile(paths)
   if(command==='local-status') {
     const group=await collection(paths),index=await transcriptIndex(paths.pool),rows=[]
     if(!group)return emit({rows})
@@ -319,6 +412,7 @@ export async function runLocal(paths,command,token,emit,{source=null,includeResu
   }
   return locked(paths,async()=>{
     const plan=await(io.plan??planLocal)(paths,{includeResume,limitsOnly})
+    if(plan.profileMismatch)throw new Error('Claude opened a different profile. Open the saved Claude profile before you move or resume conversations.')
     if(plan.setup)throw new Error('Select the source account first')
     if(plan.token!==token)throw new Error('The account or session list changed. Refresh and try again.')
     checkDesktopProfile(paths)
@@ -333,6 +427,7 @@ export async function runLocal(paths,command,token,emit,{source=null,includeResu
     }
     const group=await collection(paths);group.lastResumeAt=new Date().toISOString();group.resume=plan.resume
     await atomic(path.join(paths.state,'local-workflow.json'),group)
+    await rememberLocalProfile(paths)
     emit({done:true,ok:true,moved:plan.moving?plan.count:0,resume:plan.resume,target:paths.profileId?{...plan.to,profileId:paths.profileId}:plan.to})
   })
 }

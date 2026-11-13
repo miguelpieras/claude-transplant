@@ -27,6 +27,9 @@ struct LocalPlan: Decodable {
 struct LocalSetup: Decodable {
     let setup: Bool
 }
+struct LocalProfileMismatch: Decodable {
+    let profileMismatch: Bool
+}
 struct LocalResult: Decodable {
     let done: Bool?
     let ok: Bool?
@@ -58,15 +61,41 @@ extension Model {
             if status == 0, let data = output.data(using: .utf8), let plan = try? JSONDecoder().decode(LocalPlan.self, from: data) {
                 flowPlan = plan
                 flowNeedsSource = false
+                flowProfileMismatch = false
                 flowError = ""
+            } else if status == 0, let data = output.data(using: .utf8), (try? JSONDecoder().decode(LocalProfileMismatch.self, from: data))?.profileMismatch == true {
+                flowPlan = nil
+                flowNeedsSource = false
+                flowProfileMismatch = true
+                flowError = "Claude opened another profile. Your selected conversations are in the saved profile."
             } else if status == 0, let data = output.data(using: .utf8), (try? JSONDecoder().decode(LocalSetup.self, from: data))?.setup == true {
                 flowPlan = nil
                 flowNeedsSource = true
+                flowProfileMismatch = false
                 flowError = ""
             } else {
                 flowPlan = nil
                 flowError = error.isEmpty ? "Could not verify your Claude account. Keep Claude open and try again shortly." : error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
             }
+        }
+    }
+
+    func openSavedWorkflowProfile() {
+        guard flowProfileMismatch, !flowBusy, !flowChecking else { return }
+        flowBusy = true
+        running = true
+        flowActionError = ""
+        run(["local-open-profile", "--json"], line: { _ in }) { [weak self] status, error in
+            guard let self else { return }
+            flowBusy = false
+            running = false
+            if status != 0 {
+                flowActionError = error.isEmpty ? "Could not open the saved Claude profile. Refresh and try again." : error.replacingOccurrences(of: "claude-transplant-resume: ", with: "")
+                return
+            }
+            note = ""
+            lines = []
+            refresh()
         }
     }
 
@@ -271,6 +300,10 @@ struct WorkflowPanel: View {
                     Button("Cancel") { model.flowChoosingSource = false; model.flowNeedsSource = false; model.refreshWorkflow() }
                         .disabled(model.flowBusy)
                 }
+            } else if model.flowProfileMismatch {
+                Text("Open the profile that holds your selected conversations. Claude will close briefly, then open again.").font(.caption).foregroundStyle(.secondary)
+                Button("Open saved Claude profile") { model.openSavedWorkflowProfile() }
+                    .buttonStyle(.borderedProminent).disabled(model.flowBusy || model.flowChecking)
             } else if let plan = model.flowPlan {
                 if plan.moving {
                     Text("FROM").font(.caption).foregroundStyle(.secondary)

@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat} from 'node:fs/promises'
+import {mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, stat, symlink} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
 import childProcess, {spawnSync} from 'node:child_process'
 import {createHash} from 'node:crypto'
 import {syncBuiltinESMExports} from 'node:module'
 import {accountIdentity, accounts, cloudClient, layout, resolveDesktopProfile, signedIn} from './transplant.js'
-import {collection, selectSource, planLocal, moveRecords, recoverLocal, resumeReason, runLocal, assertDesktopStopped} from './local-workflow.mjs'
+import {collection, selectSource, planLocal, moveRecords, recoverLocal, resumeReason, runLocal, assertDesktopStopped, readLocalProfile, rememberLocalProfile, localProfileMismatch} from './local-workflow.mjs'
 
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
 const name=n=>`local_${uuid(n)}.json`
@@ -19,11 +19,12 @@ const stopped=async()=>{}
 async function fixture(t) {
   const root=await mkdtemp(path.join(tmpdir(),'transplant-test-'))
   t.after(()=>rm(root,{recursive:true,force:true}))
-  const paths={home:root,state:path.join(root,'state'),records:path.join(root,'records'),pool:path.join(root,'pool')}
+  const paths={home:root,state:path.join(root,'state'),records:path.join(root,'records'),pool:path.join(root,'pool'),desktop:layout(root).desktop}
   const from={account:uuid(1),org:uuid(2),label:'source@example.com · Personal Max',identityKnown:true,personal:true,active:false}
   const to={account:uuid(3),org:uuid(4),label:'target@example.com · Personal Max',identityKnown:true,personal:true,active:true}
   const src=path.join(paths.records,from.account,from.org),dst=path.join(paths.records,to.account,to.org)
   for(const dir of [src,dst,paths.state,paths.pool])await mkdir(dir,{recursive:true})
+  await put(paths.desktop,{})
   const original=[]
   for(let n=10;n<13;n++){
     const data={sessionId:name(n).slice(0,-5),cliSessionId:uuid(n+100),title:`Conversation ${n}`,lastActivityAt:Date.now(),...(n===11?{scheduledTaskId:'deleted-routine'}:{}),...(n===12?{forkedFromSessionId:uuid(300)}:{})}
@@ -113,11 +114,11 @@ test('fresh setup requires an explicit source and does not need an old receipt',
   await rm(path.join(f.paths.state,'local-workflow.json'))
   assert.equal(await collection(f.paths),null)
   assert.deepEqual(await planLocal(f.paths,{allAccounts:[f.from,f.to]}),{setup:true})
-  assert.deepEqual(await readdir(f.paths.state),[])
+  assert.deepEqual(await readdir(f.paths.state),['local-profile.json'])
   await assert.rejects(selectSource(f.paths,'unknown',{allAccounts:[f.from,f.to]}),/Select a source/)
   await selectSource(f.paths,`${f.from.account}/${f.from.org}`,{allAccounts:[f.from,f.to]})
   assert.equal((await planLocal(f.paths,{allAccounts:[f.from,f.to]})).count,3)
-  assert.deepEqual(await readdir(f.paths.state),['local-workflow.json'])
+  assert.deepEqual((await readdir(f.paths.state)).sort(),['local-profile.json','local-workflow.json'])
 })
 
 test('move-only planning omits continuation requests and keeps the same account token',async t=>{
@@ -144,6 +145,121 @@ test('new source conversations join the saved collection',async t=>{
   await put(path.join(f.src,name(31)),{sessionId:name(31).slice(0,-5),cliSessionId:uuid(131)})
   const plan=await planLocal(f.paths,{allAccounts:[f.from,f.to]})
   assert.equal(plan.count,4);assert(plan.records.includes(name(31)))
+})
+
+async function savedProfile(f) {
+  const profile=path.join(f.paths.home,'saved Claude')
+  await put(path.join(profile,'config.json'),{})
+  const paths={...f.paths,baseState:f.paths.state,profile,profileId:hash(profile),
+    state:path.join(f.paths.state,'profiles',hash(profile)),desktop:path.join(profile,'config.json'),records:path.join(profile,'claude-code-sessions')}
+  await put(path.join(paths.records,f.from.account,f.from.org,name(40)),{sessionId:name(40).slice(0,-5),cliSessionId:uuid(140)})
+  return paths
+}
+
+test('a saved profile blocks a stale default collection before account reads or any move',async t=>{
+  const f=await fixture(t),saved=await savedProfile(f),events=[]
+  await rememberLocalProfile(saved)
+  const before=await readFile(path.join(f.paths.state,'local-workflow.json'),'utf8')
+  const pin=await readFile(path.join(f.paths.state,'local-profile.json'),'utf8')
+  const mismatch=await planLocal(f.paths)
+  assert.deepEqual(mismatch,{profileMismatch:true,savedProfile:await realpath(saved.profile),currentProfile:await realpath(path.dirname(f.paths.desktop))})
+  let planned=false,quit=false
+  for(const moving of [true,false]) {
+    await assert.rejects(runLocal(f.paths,'local-move',f.plan.token,row=>events.push(row),{io:{
+      plan:async()=>{planned=true;return {...f.plan,moving}},quitDesktop:async()=>{quit=true}
+    }}),/different profile/)
+  }
+  await assert.rejects(runLocal(f.paths,'local-status',null,row=>events.push(row)),/different profile/)
+  assert.equal(planned,false);assert.equal(quit,false);assert.deepEqual(events,[])
+  assert.equal(await readFile(path.join(f.paths.state,'local-workflow.json'),'utf8'),before)
+  assert.equal(await readFile(path.join(f.paths.state,'local-profile.json'),'utf8'),pin)
+  assert.deepEqual(await Promise.all([10,11,12].map(n=>readFile(path.join(f.src,name(n)),'utf8'))),f.original)
+})
+
+test('explicit source selection changes the saved profile and canonical aliases match',async t=>{
+  const f=await fixture(t),saved=await savedProfile(f)
+  await selectSource(saved,`${f.from.account}/${f.from.org}`,{allAccounts:[f.from,f.to]})
+  assert.equal((await readLocalProfile(f.paths)).profile,await realpath(saved.profile))
+  assert.equal(await localProfileMismatch(saved),null)
+  const alias=path.join(f.paths.home,'profile alias')
+  await symlink(saved.profile,alias)
+  assert.equal(await localProfileMismatch({...saved,profile:alias}),null)
+  await selectSource(f.paths,`${f.from.account}/${f.from.org}`,{allAccounts:[f.from,f.to]})
+  assert.equal(await localProfileMismatch(f.paths),null)
+  assert.equal((await readLocalProfile(saved)).profile,await realpath(path.dirname(f.paths.desktop)))
+})
+
+test('missing and invalid saved profile markers cannot start a restore',async t=>{
+  const f=await fixture(t),marker=path.join(f.paths.state,'local-profile.json')
+  await rm(marker)
+  assert.equal(await readLocalProfile(f.paths),null)
+  await assert.rejects(runLocal(f.paths,'local-open-profile',null,()=>{}),/No different saved/)
+  for(const value of ['{invalid','null','{}',JSON.stringify({version:1,profile:'relative'}),JSON.stringify({version:1,profile:path.join(f.paths.home,'missing')})]) {
+    await writeFile(marker,value)
+    await assert.rejects(planLocal(f.paths),/profile/i)
+    await assert.rejects(runLocal(f.paths,'local-open-profile',null,()=>{}),/profile/i)
+  }
+  const saved=await savedProfile(f)
+  await rememberLocalProfile(saved)
+  await rm(saved.desktop)
+  await assert.rejects(planLocal(f.paths),/profile is missing/)
+})
+
+test('a failed saved-profile write restores the previous source selection',async t=>{
+  const f=await fixture(t),before=await collection(f.paths),marker=path.join(f.paths.state,'local-profile.json')
+  await rm(marker);await mkdir(marker)
+  await assert.rejects(selectSource(f.paths,`${f.to.account}/${f.to.org}`,{allAccounts:[f.from,f.to]}))
+  assert.deepEqual(await collection(f.paths),before)
+})
+
+test('open saved profile checks workers and retains record and collection bytes',async t=>{
+  const f=await fixture(t),saved=await savedProfile(f),events=[],calls=[]
+  await rememberLocalProfile(saved)
+  const files=[path.join(f.paths.state,'local-workflow.json'),path.join(f.paths.state,'local-profile.json'),path.join(f.src,name(10)),path.join(saved.records,f.from.account,f.from.org,name(40))]
+  const before=await Promise.all(files.map(file=>readFile(file,'utf8')))
+  await runLocal(f.paths,'local-open-profile',null,row=>events.push(row),{io:{
+    quitDesktop:async paths=>{assert.equal(paths,f.paths);calls.push('quit')},
+    checkStopped:async(_paths,rows)=>{calls.push('workers');assert(rows.some(row=>row.data.cliSessionId===uuid(110)));assert(rows.some(row=>row.data.cliSessionId===uuid(140)))},
+    openDesktop:async paths=>{calls.push('open');assert.equal(paths.profile,await realpath(saved.profile));assert.equal(paths.desktop,await realpath(saved.desktop))}
+  }})
+  assert.deepEqual(calls,['quit','workers','open'])
+  assert.deepEqual(events,[{opened:true,profile:await realpath(saved.profile)}])
+  assert.deepEqual(await Promise.all(files.map(file=>readFile(file,'utf8'))),before)
+})
+
+test('open saved profile restores the old profile after quit or worker failure',async t=>{
+  const f=await fixture(t),saved=await savedProfile(f)
+  await rememberLocalProfile(saved)
+  const calls=[]
+  await assert.rejects(runLocal(f.paths,'local-open-profile',null,()=>{assert.fail('No success result expected')},{io:{
+    quitDesktop:async()=>{calls.push('quit');throw Error('An open dialog stopped quit')},
+    checkStopped:async()=>calls.push('workers'),openDesktop:async paths=>{assert.equal(paths,f.paths);calls.push('restore')}
+  }}),/open dialog/)
+  assert.deepEqual(calls,['quit','restore'])
+  calls.length=0
+  await assert.rejects(runLocal(f.paths,'local-open-profile',null,()=>{assert.fail('No success result expected')},{io:{
+    quitDesktop:async()=>calls.push('quit'),
+    checkStopped:async()=>{calls.push('workers');throw Error('A worker is still running')},
+    openDesktop:async paths=>{assert.equal(paths,f.paths);calls.push('restore')}
+  }}),/worker is still running/)
+  assert.deepEqual(calls,['quit','workers','restore'])
+})
+
+test('a successful move remembers its profile after Desktop gets a new process identity',async t=>{
+  const f=await fixture(t),base=layout(f.paths.home),events=[]
+  let pid=123
+  const started='Thu Nov 12 10:00:00 2026',executable=path.join(base.claudeApp,'Contents/MacOS/Claude')
+  t.mock.method(childProcess,'spawnSync',(_command,args)=>({status:0,stdout:args.includes('-p')?`${started} ${executable}\n`:`${pid} 1 ${started} ${executable}\n`}))
+  syncBuiltinESMExports()
+  t.after(()=>{t.mock.restoreAll();syncBuiltinESMExports()})
+  f.paths.desktopInstance=resolveDesktopProfile(base).desktopInstance
+  await runLocal(f.paths,'local-move',f.plan.token,row=>events.push(row),{io:{
+    plan:async()=>f.plan,quitDesktop:async()=>{},checkStopped:stopped,openDesktop:async()=>{pid++}
+  }})
+  assert.notEqual(resolveDesktopProfile(base).desktopInstance,f.paths.desktopInstance)
+  assert.equal(events.at(-1).done,true)
+  assert.equal(events.at(-1).ok,true)
+  assert.equal((await readLocalProfile(f.paths)).profile,await realpath(path.dirname(f.paths.desktop)))
 })
 
 test('new active accounts appear before they have a session directory',async t=>{

@@ -28,7 +28,9 @@ The menu bar flow moves local conversations directly. It does not copy or check 
 
 The app shows **Checking account…** while it reads and verifies your Claude login. Move and resume are unavailable during this check. A failed account check is reported separately from a verified plan that is not Personal Max or Pro. After a failed account check, click Refresh to check the current login again.
 
-If Claude Desktop is open with a custom `--user-data-dir`, the menu bar app uses that profile. Select a source the first time you use each profile. Moves reopen the same profile. Use the default profile for the advanced commands.
+If Claude Desktop is open with a custom `--user-data-dir`, the menu bar app uses that profile. Selecting a source or completing a move saves the selected profile. If Claude later opens another profile, the app blocks moves and resume requests. Click **Open saved Claude profile** to close Claude normally and reopen the profile that holds your conversations. Then check the account and select the destination Personal plan. **Accounts → Choose a different source** explicitly selects a collection in the current profile. Use the default profile for the advanced commands.
+
+The same recovery action is available in the terminal with `claude-transplant-resume local-open-profile`. It does not move records or send continuation messages.
 
 The collection follows its last destination. New conversations created there join the next move. Conversations that were already in a destination before the move stay there if you later move the collection away. **Accounts → Choose a different source** explicitly starts a new collection from all records in that account and plan.
 

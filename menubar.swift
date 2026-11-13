@@ -248,6 +248,7 @@ final class Model: ObservableObject {
     @Published var accounts: [Account] = []
     @Published var flowPlan: LocalPlan?
     @Published var flowNeedsSource = false
+    @Published var flowProfileMismatch = false
     @Published var flowSource = ""
     @Published var flowResume = true
     var flowChoosingSource = false

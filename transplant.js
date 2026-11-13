@@ -45,6 +45,7 @@ const HELP = `claude-transplant-resume   move Claude Code history between accoun
   claude-transplant-resume local-plan  show the current destination and continuation candidates
   claude-transplant-resume local-move --restart-approved <token>  execute that local plan
   claude-transplant-resume local-status  check assistant activity after a resume attempt
+  claude-transplant-resume local-open-profile  reopen the saved conversation profile
   claude-transplant-resume project-capture --project <chan_id> --source <account/org> --output <folder>  capture a project without changing it
   claude-transplant-resume project-verify --capture <folder>  verify a saved project capture
   claude-transplant-resume project-prepare --capture <folder> --output <folder>  prepare files for a project rebuild
@@ -4376,7 +4377,7 @@ async function main(argv) {
   const [nodeMajor,nodeMinor]=process.versions.node.split('.').map(Number)
   if (nodeMajor<22||nodeMajor===22&&nodeMinor<21) throw new Error('Node 22.21 or newer is required')
   const base = layout()
-  const localProfileCommand = ['accounts', 'local-source', 'local-plan', 'local-move', 'local-status', 'local-identity'].includes(args.cmd)
+  const localProfileCommand = ['accounts', 'local-source', 'local-plan', 'local-move', 'local-status', 'local-identity', 'local-open-profile'].includes(args.cmd)
   const paths = ['menubar', 'project-prepare', 'project-verify'].includes(args.cmd) ? base : resolveDesktopProfile(base)
   if (paths.profile && !localProfileCommand) throw new Error('Use the local workflow with a custom Claude Desktop profile')
   const out = process.stdout
@@ -4411,7 +4412,7 @@ async function main(argv) {
     if (!summary.complete) process.exitCode = 1
     return args.json ? emit(summary) : out.write(`${summary.complete ? 'Project captured and verified' : 'Partial project capture saved'} | ${summary.threads} threads | ${summary.path}\n${summary.missing.map(value=>`  ${value}\n`).join('')}`)
   }
-  if (['local-source','local-plan','local-move','local-status','local-identity'].includes(args.cmd)) {
+  if (['local-source','local-plan','local-move','local-status','local-identity','local-open-profile'].includes(args.cmd)) {
     if (args.from.length || args.to || args.dry || args.cloud || args.moveOnly) throw new Error('Local workflow uses the verified signed-in Personal plan')
     const {runLocal} = await import('./local-workflow.mjs')
     return runLocal(paths,args.cmd,args.restartApproved,emit,{source:args.source,includeResume:!args.noResume,limitsOnly:args.limitsOnly})
