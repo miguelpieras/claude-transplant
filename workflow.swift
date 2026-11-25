@@ -219,7 +219,7 @@ extension Model {
 
 enum ClaudeResume {
     static let message = """
-    Continue the existing task from where it stopped. Check the status and results of subagents, background processes, interrupted commands, and pending checks. Use completed results and let active work continue. Resume unfinished subagents from their last known state. Start a replacement if a subagent cannot resume and its work is still needed. Restart stopped processes and interrupted commands only if they are still needed and safe to run again. Keep the existing scope and instructions.
+    Usage is available again on the current plan. Take the next unfinished step now, even if an earlier usage limit message told you to wait. Check the status and results of subagents, background processes, interrupted commands, and pending checks. Use completed results and let active work continue. Resume unfinished subagents from their last known state. Start a replacement if a subagent cannot resume and its work is still needed. Restart stopped processes and interrupted commands only if they are still needed and safe to run again. Keep the existing scope and instructions.
     """
     static func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {
         var value: CFTypeRef?
